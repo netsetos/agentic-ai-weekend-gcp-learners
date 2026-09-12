@@ -1,0 +1,111 @@
+# Setup
+
+Two ways to run the notebooks: **Colab** (nothing to install) or **local Jupyter**. Both authenticate to GCP with
+Application Default Credentials; there are no API keys to manage anywhere in the course.
+
+## Step 0 - the GCP project, once
+
+This is lesson 1.1, condensed. Do it once, before Module 1.
+
+```bash
+# 1. The project
+gcloud projects create documind-ai-YOUR-ID --name="DocuMind AI Capstone"
+gcloud config set project documind-ai-YOUR-ID
+
+# 2. Billing (required even for free-tier services)
+gcloud billing projects link documind-ai-YOUR-ID \
+  --billing-account=$(gcloud billing accounts list --format="value(name)" --limit=1)
+```
+
+```bash
+# Enable the 32 APIs the DocuMind kit needs - in TWO calls. Service Usage takes at most
+# twenty services per call (SU_MAX_BATCH_SIZE_EXCEEDED); the first live run learnt it (4.8, F1).
+# The same list, in the same two calls, is what lesson 12.1's kit runs (deploy/commands/lesson-12.1.sh).
+gcloud services enable \
+  run.googleapis.com \
+  compute.googleapis.com \
+  vpcaccess.googleapis.com \
+  pubsub.googleapis.com \
+  artifactregistry.googleapis.com \
+  secretmanager.googleapis.com \
+  firestore.googleapis.com \
+  storage.googleapis.com \
+  aiplatform.googleapis.com \
+  documentai.googleapis.com \
+  speech.googleapis.com \
+  texttospeech.googleapis.com \
+  dlp.googleapis.com \
+  iap.googleapis.com \
+  iamcredentials.googleapis.com \
+  cloudbuild.googleapis.com
+
+gcloud services enable \
+  cloudtrace.googleapis.com \
+  monitoring.googleapis.com \
+  logging.googleapis.com \
+  billingbudgets.googleapis.com \
+  bigquery.googleapis.com \
+  discoveryengine.googleapis.com \
+  dataplex.googleapis.com \
+  sqladmin.googleapis.com \
+  eventarc.googleapis.com \
+  workflows.googleapis.com \
+  cloudscheduler.googleapis.com \
+  cloudfunctions.googleapis.com \
+  modelarmor.googleapis.com \
+  cloudbilling.googleapis.com \
+  cloudresourcemanager.googleapis.com \
+  serviceusage.googleapis.com
+
+# Wait for propagation (IAM can take up to 60s)
+echo "Waiting 60s for API propagation..."
+sleep 60
+
+# Verify all APIs are enabled
+gcloud services list --enabled --format="table(name)"
+```
+
+```bash
+# 4. Default regions for the course (generation is global; these are for the regional services)
+gcloud config set compute/region us-central1
+gcloud config set run/region us-central1
+```
+
+Set a budget alert before you run anything (lesson 1.1, step 3). The kit's `make preflight` in
+[netsetos/agentic-ai-weekend-gcp](https://github.com/netsetos/agentic-ai-weekend-gcp) checks all of this read-only.
+
+## Colab
+
+Every notebook starts with the same two cells: the pinned installs, then
+
+```python
+from google.colab import auth
+auth.authenticate_user()
+```
+
+Change `PROJECT_ID = "documind-ai-YOUR-ID"` to your project id and run the rest in order. Notebooks from 2.3 on clone the
+kit (`/content/agentic-ai-weekend-gcp`, branch `feat/lesson-4.8-live-evals`) the first time they need it.
+
+## Local Jupyter
+
+```bash
+git clone https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
+cd agentic-ai-weekend-gcp-learners
+python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cp .env.example .env                                   # PROJECT_ID, REGION
+gcloud auth application-default login
+jupyter lab
+```
+
+Locally the `auth.authenticate_user()` cell is a no-op outside Colab; ADC from `gcloud auth application-default login`
+is what the clients use. Clone the kit beside this repo if you want the notebooks to find it without cloning:
+
+```bash
+git clone --depth 1 -b feat/lesson-4.8-live-evals https://github.com/netsetos/agentic-ai-weekend-gcp
+```
+
+## What costs money
+
+Every notebook prints what its calls cost, in USD and INR. The expensive lessons say so at the top (Document AI pages,
+tuning jobs, GPU services in Module 11) and the kit's `make off` turns the deployed lane off at the end of a day.
