@@ -4,6 +4,11 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+# The shape of a chunk row (12 September 2026). 1 is the ledger's shape: doc_key, current, indexed_at. 2 adds the
+# chunk's own identity (chunk_hash, locator), the embedding stamp (embedding_model, embedding_version) and the
+# retention field (expire_at). A backfill is explicit, never guessed from a missing field.
+SCHEMA_VERSION = 2
+
 
 class IngestMessage(BaseModel):
     """The object record Cloud Storage publishes on object.finalized (eventarc.tf's
@@ -66,6 +71,7 @@ class DocumentContract(BaseModel):
     # The ledger (11 September 2026): when the document says it applies from. Declared by the document, never
     # guessed by the pipeline; absent means undated. Carried onto every chunk and every citation.
     effective_from: str | None = None
+    schema_version: int = SCHEMA_VERSION
 
     @property
     def doc_key(self) -> str:
@@ -83,11 +89,36 @@ class DocumentContract(BaseModel):
         # about documents ACME had uploaded. The colon matches the ids the notebooks mint
         # (acme:hr_policy_2026#NP-03); the same id in one tenant's index and another's is a
         # collision, never a saving.
+        #
+        # The id names the VERSION and the position; it is stable for citations and the golden set. The
+        # chunk's identity ACROSS versions is its chunk_hash and its locator (12 September 2026), two
+        # fields on the row - a decision recorded in deploy/INDEXING.md.
         return f"{self.tenant_id}:{self.sha256}#{i}"
 
 
 def sha256_of(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+_WS = re.compile(r"\s+")
+
+
+def chunk_hash(text: str) -> str:
+    """The chunk's identity across versions: the hash of its text with the whitespace collapsed. A re-issued
+    document keeps every chunk whose hash it keeps - the carry-over in indexer.py copies their vectors and
+    embeds only the rest. Whitespace is collapsed because a re-wrapped paragraph is the same paragraph."""
+    return hashlib.sha256(_WS.sub(" ", text).strip().encode("utf-8")).hexdigest()
+
+
+def is_stale(event_generation, ledger_generation) -> bool:
+    """The generation guard. Cloud Storage numbers every version of an object; the ledger records the generation
+    it indexed. An event carrying an OLDER generation than the ledger's is a late redelivery (push delivery is
+    at-least-once and not in order), and acting on it would make an old version current again. A generation
+    the ledger has not seen, or a ledger with none, is never stale."""
+    try:
+        return int(str(event_generation)) < int(str(ledger_generation))
+    except (TypeError, ValueError):
+        return False
 
 
 # A document declares its own effective date: `effective_from: 2026-10-01` (or `Effective from: ...`) in its first

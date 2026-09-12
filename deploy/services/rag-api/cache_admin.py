@@ -13,9 +13,12 @@ evals/corpus/<tenant>/ with no PDF twin), which is over the 4,096-token minimum 
 and is exactly the material every question about the tenant's policies retrieves. The system
 instruction is the generator's SYSTEM, so the cache and the request agree on the rules.
 
-The cache is keyed to a MODEL (GENERATOR_MODEL) and to the corpus manifest's hash: generator.py only
-attaches it when the model matches, and a changed corpus is a new cache. The first live create records
-where it landed - global or regional - which is the question CLAUDE.md has carried since 4 September.
+The cache is keyed to a MODEL (GENERATOR_MODEL), to the corpus manifest's hash, and - since 12 September 2026 -
+to the ledger's corpus fingerprint (ledger/{tenant}, re-computed by the ingest worker on every reindex,
+retirement and reactivation): generator.py only attaches the cache when the model matches AND the fingerprint
+still does, so a changed corpus runs uncached (the API logs cache_stale) until this tool packs it again.
+`show` says whether the record is stale. The first live create records where it landed - global or regional -
+which is the question CLAUDE.md has carried since 4 September.
 """
 from __future__ import annotations
 
@@ -88,14 +91,22 @@ def main() -> int:
     mgr = TenantCacheManager(a.project)
     if a.op == "create":
         pack, version = pack_for(a.tenant)
-        rec = mgr.create(a.tenant, SYSTEM, pack, ttl_s=a.ttl, version=version)
+        fingerprint = mgr.ledger_fingerprint(a.tenant) or ""
+        rec = mgr.create(a.tenant, SYSTEM, pack, ttl_s=a.ttl, version=version, fingerprint=fingerprint)
         print(f"  cache {rec['cache_name']}\n  location {rec['location']} (global or regional: the answer to CLAUDE.md's question)\n"
-              f"  model {rec['model']} | tokens {rec['tokens']} | expires {rec['expire_time']} | corpus {version}")
+              f"  model {rec['model']} | tokens {rec['tokens']} | expires {rec['expire_time']} | corpus {version} | "
+              f"ledger fingerprint {fingerprint or 'none yet (no reindex on this lane)'}")
         print(f"  the next /v1/query for {a.tenant} carries cached_content; read cached_tokens in its usage row")
         return 0
     rec = mgr.get(a.tenant, min_remaining_s=0)
     if a.op == "show":
         print(rec or f"  no cache for {a.tenant}")
+        if rec:
+            moved = mgr.stale_against(rec, a.tenant)
+            print(f"  STALE: the ledger's fingerprint is {moved}, the cache was packed from {rec.get('corpus_fingerprint')} - "
+                  f"the API answers uncached; make cache TENANT={a.tenant} rebuilds it" if moved else
+                  "  current: the cache matches the ledger's corpus fingerprint" if rec.get("corpus_fingerprint") else
+                  "  packed before the fingerprint existed: trusted as-is until the next make cache")
         return 0
     if a.op == "refresh":
         print(mgr.refresh(a.tenant, ttl_s=a.ttl) or f"  no live cache for {a.tenant} to refresh")

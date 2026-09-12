@@ -9,10 +9,10 @@ Lesson ids ending in `p` are practice labs.
 |---|---|---|
 | A owned: extracted verbatim from a notebook heredoc | 86 | 0 |
 | B pasted: a block carried verbatim by notebooks | 1 | 0 |
-| C used: imported, read, run or excerpted by notebook code | 72 | 23 |
+| C used: imported, read, run or excerpted by notebook code | 74 | 23 |
 | D prose: named in a notebook's text only | 0 | 0 |
-| E unreferenced by any notebook | 0 | 40 |
-| total | 159 | 63 |
+| E unreferenced by any notebook | 0 | 42 |
+| total | 161 | 65 |
 
 ## A. owned: extracted verbatim from a notebook heredoc (86)
 
@@ -111,11 +111,12 @@ Lesson ids ending in `p` are practice labs.
 |---|---|---|---|
 | `shared/documind_corpus.py` | code | - | 2.3,4.2,4.2p,4.5,4.5p |
 
-## C. used: imported, read, run or excerpted by notebook code (95)
+## C. used: imported, read, run or excerpted by notebook code (97)
 
 | File | Kind | Owner | Shown by |
 |---|---|---|---|
 | `../.github/workflows/documind-dryrun.yml` | code | - | 12.7 |
+| `INDEXING.md` | code | - | 12.1,12.2,12.3,12.5,12.7,13.1 |
 | `Makefile` | code | - | 11.1,11.4,11.5,12.1,12.3,12.5,12.7,12.8,13.2,4.8,7.1,7.2,8.4 |
 | `README.md` | data | - | 12.2,12.7 |
 | `UNOWNED.md` | data | - | 12.7,12.8 |
@@ -127,7 +128,7 @@ Lesson ids ending in `p` are practice labs.
 | `evals/corpus/acme/annual_report_2026.md` | data | - | 4.6 |
 | `evals/corpus/acme/annual_report_2026_fig3.png` | data | - | 9.1,9.2,9.3,9.4,9.5,9.6 |
 | `evals/corpus/acme/code_on_wages_2019.pdf` | data | - | 12.5 |
-| `evals/corpus/acme/hr_policy_2026.md` | data | - | 12.5,12.7,2.3,4.5,4.5p,4.6,4.7,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.2p,8.1p,8.2p,8.3p,8.4p,9.6 |
+| `evals/corpus/acme/hr_policy_2026.md` | data | - | 12.5,12.7,2.3,4.2,4.2p,4.5,4.5p,4.6,4.7,4.8,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.2p,8.1p,8.2p,8.3p,8.4p,9.6 |
 | `evals/corpus/acme/inv_2026_0412.png` | data | - | 9.1,9.2,9.3,9.4,9.5,9.6 |
 | `evals/corpus/acme/msa_acme_2026.md` | data | - | 4.6,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.2p,8.1p,8.2p,8.3p,8.4p |
 | `evals/corpus/acme/payment_of_bonus_act_1965.pdf` | data | - | 9.3,9.6 |
@@ -137,7 +138,7 @@ Lesson ids ending in `p` are practice labs.
 | `evals/corpus/zeta/code_on_wages_2019.pdf` | data | - | 12.5 |
 | `evals/corpus/zeta/hr_policy_zeta_2026.md` | data | - | 4.7 |
 | `evals/corpus/zeta/msa_zeta_2026.md` | data | - | 12.5 |
-| `evals/demo/hr_policy_2026_v2.md` | data | - | 12.5 |
+| `evals/demo/hr_policy_2026_v2.md` | data | - | 12.5,4.7,4.8 |
 | `evals/fetch_real.py` | code | - | 12.5,12.7,4.2,4.7 |
 | `evals/golden.jsonl` | data | - | 10.1,10.3,10.4,10.5,10.6,11.4,12.1,12.2,12.3,12.5,12.7,12.8,13.2,13.4,4.2p,4.7,4.8,5.5,7.2,7.3,8.1,8.2,8.5,8.6,8.7,9.1,9.2,9.3 |
 | `evals/judge.py` | code | - | 10.1,10.2,10.3,10.4,10.4p,10.5,10.6,11.1,11.2,11.3,11.4,11.5,12.1,12.2,12.3,12.4,12.5,12.6,12.7,12.8,3.2p,3.2,4.7 |
@@ -157,17 +158,17 @@ Lesson ids ending in `p` are practice labs.
 | `services/chat/migrate.py` | code | - | 11.5,12.8,8.5 |
 | `services/chat/requirements-local.txt` | code | - | 12.7 |
 | `services/chat/requirements.txt` | code | - | 12.7 |
-| `services/chat/tools.py` | code | - | 10.1p,10.4,12.4,12.8,4.2,4.2p,4.3p,4.3,4.4p,4.4,4.5,4.5p,5.3,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.1,7.1p,7.2,7.2p,7.3,7.3p,8.1p,8.1,8.2,8.2p,8.3,8.3p,8.4,8.4p,8.5,8.6,8.7,9.6 |
+| `services/chat/tools.py` | code | - | 10.1p,10.4,12.4,12.5,12.8,4.2,4.2p,4.3p,4.3,4.4p,4.4,4.5,4.5p,5.3,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.1,7.1p,7.2,7.2p,7.3,7.3p,8.1p,8.1,8.2,8.2p,8.3,8.3p,8.4,8.4p,8.5,8.6,8.7,9.6 |
 | `services/gemma-vllm/Dockerfile` | code | - | 11.2,12.7 |
 | `services/gemma-vllm/auth.py` | code | - | 11.2 |
 | `services/gemma-vllm/cloudbuild.yaml` | code | - | 11.1,11.1p,12.7 |
-| `services/gemma-vllm/documind.py` | code | - | 10.1p,10.4,11.2,11.2p,11.3p,12.1,12.1p,12.3,12.3p,12.4p,12.5,12.6,12.7,12.8,2.4,2.4p,4.6,6.4,7.1,7.3,7.3p,8.1p,8.1,8.2,8.3,8.3p,8.4,8.4p,8.6,8.7,9.6 |
+| `services/gemma-vllm/documind.py` | code | - | 10.1p,10.4,11.2,11.2p,11.3p,12.1,12.1p,12.3,12.3p,12.4p,12.5,12.6,12.7,12.8,13.3,2.4,2.4p,4.6,6.4,7.1,7.3,7.3p,8.1p,8.1,8.2,8.3,8.3p,8.4,8.4p,8.6,8.7,9.6 |
 | `services/gemma-vllm/logging_module.py` | code | - | 11.2,11.2p |
 | `services/gemma-vllm/main.py` | code | - | 11.2 |
 | `services/gemma-vllm/requirements.txt` | code | - | 11.2,12.7 |
 | `services/gemma-vllm/schemas.py` | code | - | 11.2 |
 | `services/gemma-vllm/streaming.py` | code | - | 11.1p,11.2,11.2p,12.1,12.2,12.4p,12.4,12.5,5.5,6.4,8.4,8.4p |
-| `services/ingest/reconcile.py` | code | - | 12.5 |
+| `services/ingest/reconcile.py` | code | - | 12.2,12.3,12.5 |
 | `services/litellm/Dockerfile` | code | - | 11.3,12.7 |
 | `services/litellm/config.lean.yaml` | code | - | 11.3 |
 | `services/litellm/config.yaml` | code | - | 12.6 |
@@ -180,7 +181,7 @@ Lesson ids ending in `p` are practice labs.
 | `services/litellm/token_proxy.py` | code | - | 11.3 |
 | `services/rag-api/budget.py` | code | - | 10.3,12.2 |
 | `services/rag-api/cache_admin.py` | code | - | 10.2 |
-| `services/rag-api/cache_manager.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,12.2,12.6,4.5,4.5p |
+| `services/rag-api/cache_manager.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,12.2,12.5,12.6,4.5,4.5p |
 | `services/rag-api/context_budget.py` | code | - | 12.2 |
 | `services/rag-api/hybrid.py` | code | - | 10.4p,11.3p,12.2,4.5,4.5p,4.6,4.8,5.5 |
 | `services/rag-api/router.py` | code | - | 10.1,10.2,10.3,10.3p,10.4,10.5,10.6,11.1p,11.2p,11.3,11.3p,12.1,12.2,12.6,3.3,3.3p,5.5,6.4,8.2 |
@@ -203,6 +204,7 @@ Lesson ids ending in `p` are practice labs.
 | `smoke/smoke_gateway.py` | code | - | 12.8 |
 | `smoke/smoke_mcp.py` | code | - | 12.8,7.2 |
 | `smoke/smoke_media.py` | code | - | 12.8 |
+| `smoke/smoke_reindex.py` | code | - | 12.8 |
 | `smoke/smoke_slm.py` | code | - | 12.8 |
 | `terraform/gateway.tf` | code | - | 10.6,11.1,11.2,11.3,11.3p,11.4,11.5,12.1,12.2,12.3,12.4p,12.4,12.5,12.6,12.7,12.8,13.3 |
 | `terraform/gke.tf` | code | - | 11.5,12.1 |
@@ -211,7 +213,7 @@ Lesson ids ending in `p` are practice labs.
 | `terraform/spanner.tf` | code | - | 1.1p,4.6 |
 | `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.5,4.6,4.7 |
 
-## E. unreferenced by any notebook (40)
+## E. unreferenced by any notebook (42)
 
 | File | Kind | Owner | Shown by |
 |---|---|---|---|
@@ -254,4 +256,6 @@ Lesson ids ending in `p` are practice labs.
 | `evals/corpus/zeta/osh_code_2020.pdf` | data | - | - |
 | `evals/demo/README.md` | data | - | - |
 | `evals/demo/gratuity_amendment_2026.md` | data | - | - |
+| `evals/demo/smoke_note_v1.md` | data | - | - |
+| `evals/demo/smoke_note_v2.md` | data | - | - |
 | `gke/README.md` | data | - | - |

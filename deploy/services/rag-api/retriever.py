@@ -23,6 +23,8 @@ def _fs():
     return firestore.Client(project=settings.project_id, database="(default)")
 
 def embed_query(q: str) -> list[float]:
+    # settings.embed_model is EMBEDDING_MODEL in the environment - the SAME variable the ingest worker stamps on
+    # every row (variables.tf: embedding_model). Query and document vectors come from one declared model.
     resp = _genai_client().models.embed_content(
         model=settings.embed_model, contents=q,
         config=types.EmbedContentConfig(task_type="RETRIEVAL_QUERY", output_dimensionality=768))
@@ -60,11 +62,29 @@ def _firestore_fallback(vec: list[float], tenant_id: str, top_k: int) -> list[di
         out.append(d)
     return out
 
+def newest_per_source(chunks: list[dict]) -> list[dict]:
+    """One version per source, the newest (12 September 2026). The worker swaps a long document in more than one
+    batch, so for a moment two versions of one source can both be current, and a candidate set that held both
+    would pack both - the reader would be asked to reconcile v1 with v2. Group by source_uri, keep the doc_key
+    whose rows landed last (indexed_at, or reactivated_at for the undo), drop the other version's rows. Rows
+    without a doc_key or a timestamp (a lane older than the ledger) pass through untouched."""
+    newest: dict = {}
+    for c in chunks:
+        src, key = c.get("source_uri"), c.get("doc_key")
+        at = c.get("reactivated_at") or c.get("indexed_at")
+        if not (src and key and at is not None):
+            continue
+        if src not in newest or at > newest[src][1]:
+            newest[src] = (key, at)
+    return [c for c in chunks
+            if not (c.get("doc_key") and c.get("source_uri") in newest and c["doc_key"] != newest[c["source_uri"]][0])]
+
 def prefer_current(chunks: list[dict]) -> list[dict]:
     """Version-chain dedupe, BEFORE the reranker (12.5's ledger). A chunk the ledger has retired is never a
     source, whether or not its successor was retrieved - the model is not asked to reconcile v1 with v2.
-    Chunks without the field (a lane older than the ledger) pass through; a no-op until the flag is stamped."""
-    return [c for c in chunks if c.get("current") is not False]
+    Chunks without the field (a lane older than the ledger) pass through; a no-op until the flag is stamped.
+    Then one version per source: the newest-per-source guard closes the swap window on its own."""
+    return newest_per_source([c for c in chunks if c.get("current") is not False])
 
 def retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None) -> list[dict]:
     vec = embed_query(query)

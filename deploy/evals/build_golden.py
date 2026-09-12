@@ -5,7 +5,12 @@ included, and 27 over the real documents that fetch_real.py puts under acme, zet
 
 Schema is lesson 4.7's, unchanged:
     {id, shape, question, tenant, must_contain, must_retrieve, answerable[, note]}
-    shape in {lookup, join, refusal, isolation}
+    shape in {lookup, join, refusal, isolation, version}
+
+A `version` row (12 September 2026, the ledger) names its `source` document; its must_contain is
+the CURRENT version's figure and its must_not_contain a figure only a RETIRED version under
+evals/demo holds. It moves with the document, in the same commit: re-issue the handbook without
+moving it and the offline gate is red before anything deploys.
 
 4.7's recall_at_k matches `must_retrieve` entries as SUBSTRINGS of the retrieved ids, so
 anchors here are document slugs and clause ids - both of which the runner can see. See
@@ -27,7 +32,7 @@ CORPUS = os.path.join(HERE, "corpus")
 
 
 def R(rid, shape, q, tenant, contain, retrieve, answerable, note=None,
-      not_contain=None, cite_kind=None):
+      not_contain=None, cite_kind=None, source=None):
     row = {"id": rid, "shape": shape, "question": q, "tenant": tenant,
            "must_contain": contain, "must_retrieve": retrieve,
            "answerable": answerable}
@@ -35,6 +40,8 @@ def R(rid, shape, q, tenant, contain, retrieve, answerable, note=None,
         row["must_not_contain"] = not_contain
     if cite_kind:
         row["must_cite_kind"] = cite_kind     # Module 9: figure | segment, reported live beside the thresholds
+    if source:
+        row["source"] = source                # the ledger (12 September 2026): the document a version row is about
     if note:
         row["note"] = note
     return row
@@ -275,6 +282,19 @@ GOLDEN = [
     R("mm-05", "refusal", "What does Figure 7 of ACME's annual report show?",
       "acme", [], [], False,
       "The report references Figure 3 and no other figure. A model that describes a Figure 7 invented it."),
+
+    # ---------------------------------------------------------- version (1): the ledger's row
+    # The same question as lk-06, with the other half stated: the CURRENT handbook says 60 days, and the
+    # figure the retired revision under evals/demo carries (90 days) must never be cited. It goes red in two
+    # different ways - the ledger serving a version it should have retired, or the document re-issued without
+    # this row moving with it - and the second is the one the offline gate catches before any deploy.
+    R("vr-01", "version", "What is the notice period for a confirmed E3?",
+      "acme", ["60"], ["NP-03", "hr_policy_2026"], True,
+      "The ledger's row (12.5, 12 September 2026). lk-06 asks the same question; this row adds what must NOT "
+      "be said: revision 2 of the handbook (evals/demo/hr_policy_2026_v2.md) makes it 90 days. When the "
+      "handbook is re-issued, this row and lk-06 move to 90 in the same commit as the corpus - the red gate "
+      "in between is the demo (make reindex runs the offline gate first).",
+      ["90 days"], source="hr_policy_2026.md"),
 ]
 
 # ------------------------------------------------------------------------ verify then write
@@ -303,6 +323,9 @@ def main():
         by_tenant.setdefault(t, "")
         by_tenant[t] += "\n" + slug + "\n" + body
 
+    demo_dir = os.path.join(HERE, "demo")
+    demo = "\n".join(open(os.path.join(demo_dir, f), encoding="utf-8").read()
+                     for f in sorted(os.listdir(demo_dir)) if f.endswith(".md")).lower() if os.path.isdir(demo_dir) else ""
     problems = []
     for r in GOLDEN:
         t = r["tenant"]
@@ -313,6 +336,21 @@ def main():
         for anchor in r["must_retrieve"]:
             if anchor.lower() not in by_tenant.get(t, "").lower():
                 problems.append(f"{r['id']}: anchor {anchor!r} is not in {t}'s corpus")
+        if r["shape"] == "version":
+            # THE LEDGER'S ROW: the forbidden figure is absent from the current version of its source and present
+            # in a retired version under evals/demo - so the row can fail, and only on a stale answer.
+            src = (r.get("source") or "").rsplit(".", 1)[0]
+            current = text.get((t, src), "").lower()
+            if not current:
+                problems.append(f"{r['id']}: a version row must name a text document of {t} as source")
+            if not r.get("must_not_contain"):
+                problems.append(f"{r['id']}: a version row needs a must_not_contain (the retired figure)")
+            for old in r.get("must_not_contain", []):
+                if old.lower() in current:
+                    problems.append(f"{r['id']}: must_not_contain {old!r} IS in the current {src} - move the row with the document")
+                if old.lower() not in demo:
+                    problems.append(f"{r['id']}: must_not_contain {old!r} is in no retired version under evals/demo")
+            continue
         # THE CHECK THAT MAKES THESE REAL TESTS: every value an isolation row forbids
         # must actually exist in ANOTHER tenant's corpus. A must_not_contain nobody
         # could ever leak is a row that passes whether or not the filter works.

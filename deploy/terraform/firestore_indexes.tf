@@ -93,6 +93,21 @@ resource "google_firestore_index" "answer_cache_vector" {
   }
 }
 
+# Retention (12 September 2026, deploy/INDEXING.md). The ledger retires a chunk row with a flag and a stamp -
+# expire_at = superseded_at + retention_days (variables.tf; the worker reads it as RETENTION_DAYS) - and this
+# TTL policy is the ONLY thing that ever deletes one: the platform removes the row within about a day of the
+# stamp, no account on the lane needs a delete, no cron runs one. The window is the audit window (a citation
+# can still open what it quoted) and the undo window (reactivate clears the stamp) at once. A staged version
+# the worker never swapped carries a one-day stamp and leaves the same way.
+resource "google_firestore_field" "chunks_expire_at" {
+  project    = var.project_id
+  database   = google_firestore_database.main.name
+  collection = "chunks"
+  field      = "expire_at"
+
+  ttl_config {}
+}
+
 # The roster's reverse lookup (shared/tenancy.py tenant_for, lesson 12.8: "which tenant is
 # this person on?") is a COLLECTION-GROUP query on members.email, across every tenant's
 # members at once. Firestore indexes a single field at collection scope by default and

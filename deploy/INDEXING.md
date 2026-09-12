@@ -1,0 +1,138 @@
+# Incremental indexing - the document lifecycle on the lane
+
+How a document update is handled in DocuMind, written so another team can adopt it without DocuMind. Built on
+12 September 2026 on top of the ledger of 11 September (`services/ingest/`, `terraform/`, `evals/`, `smoke/`,
+`shared/documind_corpus.py`); the plan it comes from is *Incremental Indexing on the Lane* (the handoff folder).
+The rule of the page: an update should **cost what changed, be invisible until it is whole, be reversible for
+free, be provable by the same gates as a release, and leave a trail a person can read.**
+
+## 1. Eight principles
+
+Each one is a question a reviewer can ask of any RAG index, whatever the store, and the answer this kit gives.
+
+| # | Principle | Here |
+|---|---|---|
+| P1 | **Three identities.** A source (the object path), a version (the hash of its bytes), a chunk (the hash of its text plus a locator that survives an insertion above it). | `sources/{tenant~path}`; `doc_key = tenant_sha256`; every row carries `chunk_hash` and `locator` (`NP-03`, `p7-1`, `preamble`, `figure`, `t0-60`). The chunk **id** stays `tenant:sha256#i`: stable for citations and the golden set (decision D2). |
+| P2 | **Detect change by hash and generation, never by time.** Same hash, nothing to do. An event older than the ledger's generation is a late redelivery. | `stale_generation()` before the download; the bytes are fetched **by generation**; `ingest_stale_event` acks it. `contracts.is_stale()` is the pure rule. |
+| P3 | **Pay for what changed; pin what you paid with.** Reuse every vector whose chunk hash is unchanged; stamp the embedding model and version on every row. | `embed_with_carry_over()`: 281 of the handbook's 283 chunks reused after a one-clause edit, 2 embedded. `EMBEDDING_MODEL@EMBEDDING_VERSION` from **one** Terraform variable on the worker and the API. |
+| P4 | **Visibility is a swap.** Write the new version staged and invisible, flip in one pass; the reader keeps the newest version per source on its own. | `mirror_to_firestore(staged=True)` then `swap_versions()` (new to current first, then old to retired, 400 writes a batch); `retriever.newest_per_source()` inside `prefer_current()`. |
+| P5 | **Retire, never delete; purge by policy.** A retired row stays for the retention window; a TTL policy on the store removes it, declared in Terraform, executed by the platform. | `expire_at = superseded_at + retention_days`; `google_firestore_field.chunks_expire_at` with `ttl_config {}`. **Nothing on the lane calls delete.** `reactivate` clears the stamp. |
+| P6 | **Reconcile on a schedule and measure the drift.** The event path is the fast path; the nightly walk is what makes a lost event a delay instead of a hole, and it must emit a number. | `reconcile.py` as a `google_cloud_run_v2_job` (`reconcile.tf`), 23:30 IST; `reconcile_done` carries `drift`; `documind/reconcile_drift` alerts above zero for two nights. |
+| P7 | **A reindex is a release.** The offline gate (the rows move with the document), the live gate scoped to the rows that cite the source, on a candidate, then a person. | `make reindex` runs `run_eval.py` first; the `version` shape (`vr-01`); `run_eval.py --source` / `make eval-live SOURCE=`; `smoke_reindex.py` in `make smoke-all`. |
+| P8 | **Observe the lifecycle; let the cache follow the ledger.** Events become metrics and alerts; a versions view exists; the cache is keyed to a fingerprint of the current versions. | `documind/ingest_events` / `ingest_embedded` / `ingest_reused` / `reconcile_drift`; `GET /v1/sources`, the UI's Documents page, `make sources`; `ledger/{tenant}.fingerprint` vs `tenant_caches.corpus_fingerprint` (`cache_stale`). |
+
+## 2. The update path, step by step
+
+One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new bytes). Cloud Storage publishes
+`object.finalized` with the object's **generation**; the push subscription delivers it to `documind-ingest`.
+
+1. **Guard.** `stale_generation()` reads `sources/{tenant~name}`. An event older than the recorded generation
+   is acked with `ingest_stale_event` and nothing else happens. Otherwise the bytes of *that generation* are
+   downloaded; a generation that no longer exists is the same case (its successor's event indexes the object).
+2. **Claim.** `documents/{tenant_sha256}` in a transaction. A refused claim whose status is `superseded` is the
+   undo (step 7); any other refusal is a duplicate, acked.
+3. **Parse, scan, chunk.** Text is chunked by **section** when it has `## ` headings (a handbook: one chunk per
+   clause, the clause code as the locator), otherwise fixed 2,000-character windows with a 200 overlap, page-
+   aware (`p7-1`). Every chunk gets `chunk_hash` (sha256 of its whitespace-collapsed text). The same two rules
+   live in `shared/documind_corpus.py`, so a notebook mints the same chunk texts. One DLP scan per document.
+4. **Carry-over.** The previous version's current rows of this source are read by hash; a vector is reused only
+   when its `embedding_model@embedding_version` is the configured one. The misses are embedded. `reused` and
+   `embedded` are the counts every later line carries.
+5. **Stage.** The new rows are written with `current=false, staged=true` and a one-day `expire_at` (a stage nothing
+   ever swaps leaves by policy). No reader can see them.
+6. **Swap.** `swap_versions()` flips the new rows current (clearing the stage marks), then retires every other
+   current row of the source: `current=false`, `superseded_by`, `superseded_at`, `expire_at = now + RETENTION_DAYS`,
+   `effective_to` when the successor declares a date. On the full profile the ANN tier follows: the new datapoints
+   go up after the swap, the retired ids come out.
+7. **The undo.** The same bytes again, after a newer version retired them: `reactivate()` flips the retired rows
+   back and clears their stamps; the newer version is retired in turn. Nothing is embedded (`ingest_reactivated`).
+8. **Record.** `documents/` (chunks, reused, embedded, generation), `sources/` (the ledger row: doc_key,
+   generation, sha256, chunks, reused, embedded, retired, effective_from, embedding stamp), then
+   `ledger/{tenant}.fingerprint` = sha256 of the tenant's sorted current doc_keys. `ingest_ok` (and
+   `ingest_superseded` when something was retired) carries all of it; `doc.upload` goes to the audit trail.
+
+## 3. The reader
+
+`retrieve()` asks Firestore (or Vector Search) for the tenant's nearest chunks, with `current == true` as a
+pre-filter when `RETRIEVAL_CURRENT_ONLY=on` (the second vector index in `firestore_indexes.tf`). Whatever the
+switch, `prefer_current()` drops retired rows and then keeps **one version per source** (the newest `indexed_at`
+or `reactivated_at`), before the reranker. The context header carries `effective from D` and the generator adds
+the dated rule only when a packed source has a date; the SSE citation event carries `effective_from`. The
+cache: `generate_config_kwargs()` compares the record's `corpus_fingerprint` with `ledger/{tenant}` in one read and
+runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus that changed.
+
+## 4. Fields
+
+| Where | Field | Written by | Meaning |
+|---|---|---|---|
+| `chunks/{id}` | `doc_key`, `current`, `indexed_at` | worker, loader | the version, the flag, when it landed (schema 1) |
+| `chunks/{id}` | `chunk_hash`, `locator`, `section` | worker, loader | the chunk's identity across versions (schema 2) |
+| `chunks/{id}` | `embedding_model`, `embedding_version`, `schema_version` | worker, loader | what the vector was made with; the row's shape |
+| `chunks/{id}` | `staged`, `expire_at` | worker, loader | invisible until swapped; the TTL policy's field (retired and staged rows only) |
+| `chunks/{id}` | `superseded_by`, `superseded_at`, `effective_to`, `reactivated_at` | swap, reactivate | the retirement, and the undo |
+| `documents/{doc_key}` | `status`, `chunks`, `reused`, `embedded`, `generation` | claim, finish | the per-version claim and what it cost |
+| `sources/{tenant~name}` | `doc_key`, `generation`, `sha256`, `chunks`, `reused`, `embedded`, `retired`, `effective_from`, `status`, `embedding_*` | record_source | the ledger: what is current for a path, since when, at what cost |
+| `ledger/{tenant}` | `fingerprint`, `versions`, `last_event` | refresh_fingerprint | the corpus identity the cache follows |
+| `tenant_caches/{tenant}` | `corpus_fingerprint` | cache_admin | what the pack was made from |
+
+## 5. Terraform
+
+| File | What | Why |
+|---|---|---|
+| `firestore_indexes.tf` | `google_firestore_field.chunks_expire_at` with `ttl_config {}` | the only deleter (P5) |
+| `variables.tf` | `retention_days` (30), `embedding_model`, `embedding_version` + outputs | one declared number, one declared embedding; `make deploy-services` reads the outputs into both services |
+| `reconcile.tf` | `google_cloud_run_v2_job.reconcile` on `var.reconcile_image`, IAM, the 23:30 IST schedule; `RECONCILE_JOB=true` | the whole night is one apply (P6). Needs an ingest image first: `make build`, then `make reconcile-job` |
+| `alerts.tf` | metrics `documind/ingest_events` (label `event`), `ingest_embedded`, `ingest_reused`, `reconcile_drift`; policies *Ingest failed* (10 min), *Ledger drift above zero for two nights*, *Nightly reconcile failed* | the lifecycle is a pager, not a log search (P8) |
+
+## 6. The operator's playbook
+
+| Situation | Command | What you read back |
+|---|---|---|
+| One document changed | `make reindex FILE=<new> NAME=<same name> TENANT=<t>` (the offline gate runs first), then move the golden rows it turned red, then `make eval-live SOURCE=<name> API=<candidate>` | `ingest_ok` with `reused`, `embedded`, `retired`; `ingest_superseded`; the scoped gate green |
+| Only metadata changed | nothing | the night's reconcile records the generation: *touch* |
+| A late redelivery of an old version | nothing | `ingest_stale_event`; the ledger untouched |
+| The change was wrong | `make reindex FILE=<old> NAME=<same name>` | `ingest_reactivated`, nothing embedded |
+| A document withdrawn | delete the object, or `make retire SOURCE=` | retired by the night's walk or at once; the rows expire after `RETENTION_DAYS` |
+| Many documents changed | `make ingest-corpus`, `make reconcile APPLY=1` | per-source counts; `reconcile_done` with `drift` 0 the night after |
+| Which version is live? | `make sources TENANT_ONLY=acme`, the UI's Documents page, `GET /v1/sources?tenant_id=` | every source's version, generation, counts, dates, the fingerprint |
+| Is the cache current? | `make cache CACHE_OP=show` | *current*, or *STALE* with both fingerprints |
+| A lane without the TTL policy | `make purge` (prints), `make purge APPLY=1` | the rows the policy would have removed; on a lane with the policy, nothing |
+| Does the lifecycle work at all? | `make smoke-reindex` (in `make smoke-all`) | v2 in: reindexed with the counts, the answer moved; v1 in: reactivated, the answer back |
+
+## 7. The gates
+
+- **Offline, every PR** (`run_eval.py`): the `version` shape - `must_contain` from the current version of its
+  `source`, `must_not_contain` a figure only a retired version under `evals/demo` holds. Re-issue the handbook
+  without moving `lk-06` and `vr-01` and the gate is red before anything deploys.
+- **Wiring** (`tools/check_auth_wiring.py`): the chunker measured on the handbook's two revisions (281 of 283
+  reused), the carry-over plan, the newest-per-source guard, the fake-Firestore swap / reactivate / fingerprint,
+  the TTL field, the job, the metrics, the Makefile and the deploy scripts.
+- **Live, on a candidate** (`make eval-live SOURCE=`): the rows that cite the document; a version row that cites a
+  retired figure blocks on its own; a threshold with no rows in scope is reported, not judged.
+- **Smoke** (`make smoke-reindex`): the lifecycle end to end on a three-chunk fixture.
+
+## 8. What is deliberately not done
+
+- No in-place overwrite of a chunk, ever; a re-issue is new rows beside retired ones.
+- No delete by any account or cron; `--purge` prints unless `--apply`, and exists for a lane without the policy.
+- No versions inside the shared `Citation` contract (decision D5): the version rides on the row, the header,
+  the stream and the UI.
+- No second ingestion path for updates: the reconcile re-ingests by rewriting the object onto itself.
+- Not yet (the strategy's P2): `make reembed EMBEDDING_VERSION=` (a full re-embed into new rows behind a
+  candidate), an index per embedding version on the full profile, an as-of filter on `effective_to`.
+
+## 9. How another team follows this
+
+1. Can you name a source, a version and a chunk, and does the chunk identity survive an insertion above it?
+2. Is change detected by hash and ordered by generation, with a late redelivery ignored?
+3. Does an edit of one paragraph embed one paragraph, and is the embedding model stamped on every row?
+4. Can a reader ever retrieve two versions of one source? If the write is not a swap, does the reader guard?
+5. Is anything deleted by a person or a cron, or only by a declared retention policy?
+6. Does a scheduled reconcile run, emit a drift number, and alert when it stays non-zero?
+7. Does a document change go through the same gates as a code change, with the test set moving in the same commit?
+8. Are the lifecycle events metrics with alerts, is there a versions view, and is the cache keyed to the current versions?
+
+Where each answer lives here: `services/ingest/` (the path), `services/rag-api/retriever.py` and
+`cache_manager.py` (the reader), `terraform/` (the policies), `evals/` and `smoke/` (the proof),
+`shared/documind_corpus.py` (the notebooks' copy of the rules), and lessons 4.1, 4.2, 4.5, 4.7, 4.8, 12.2, 12.3,
+12.5, 12.7, 12.8 and 13.1 to 13.3 (the teaching).

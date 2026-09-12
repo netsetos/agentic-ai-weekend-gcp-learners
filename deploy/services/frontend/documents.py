@@ -1,6 +1,8 @@
 import os
+import requests
 import streamlit as st
 from auth import tenant_for
+from chat import RAG_API_URL, _headers
 from google.cloud import storage, documentai_v1 as docai
 from google import genai
 from google.genai import types
@@ -46,8 +48,41 @@ def embed_batch(chunks):
             c["embedding"] = e.values
     return chunks
 
+def versions_section(tenant_id: str) -> None:
+    """The versions view (12 September 2026): GET /v1/sources - the tenant's ledger, as the API serves it. Which
+    version of every document is current, what the last reindex cost (chunks reused by hash, embedded, retired),
+    the date a document declares, when it landed. Rendered, never queried here: the page holds no Firestore
+    credential for the ledger, the API checks the roster, and the same rows are `make sources TENANT=`."""
+    st.subheader("Versions")
+    try:
+        r = requests.get(f"{RAG_API_URL}/v1/sources", params={"tenant_id": tenant_id}, headers=_headers(), timeout=30)
+    except Exception as e:  # noqa: BLE001 - the ledger is a view; the upload path above it must not break
+        st.info(f"The ledger is not reachable right now ({type(e).__name__}).")
+        return
+    if r.status_code == 404:
+        st.info("This API revision predates the ledger's versions view (GET /v1/sources).")
+        return
+    if r.status_code != 200:
+        st.info(f"The ledger answered {r.status_code}.")
+        return
+    body = r.json()
+    rows = body.get("sources") or []
+    if not rows:
+        st.info("No documents indexed for this tenant yet.")
+        return
+    st.caption(f"{body.get('versions') or len(rows)} current versions - corpus fingerprint {body.get('fingerprint') or 'none yet'}"
+               f" (last change: {body.get('last_event') or '-'})")
+    st.dataframe([{"document": r_["name"], "status": r_["status"], "chunks": r_["chunks"], "reused": r_["reused"],
+                   "embedded": r_["embedded"], "retired": r_["retired"], "effective from": r_["effective_from"] or "",
+                   "embedding": r_["embedding"], "indexed": (r_["indexed_at"] or "")[:19].replace("T", " ")}
+                  for r_ in rows], use_container_width=True)
+    st.caption("A re-issued document keeps its name: the worker retires the previous version (never deletes it), reuses "
+               "every chunk whose text did not change, and the retired rows expire by policy after the retention window.")
+
+
 def documents_page(user):
     st.title("📄 Documents")
+    versions_section(tenant_for(user["email"]))
     # Documents AND media (9.4 / 9.6): an image, a video or a recording is a document to the
     # ingest worker - it is described, not parsed, and its caption or segments join the same
     # chunks the text does. The list is what the worker's MEDIA_TYPES and parser accept.

@@ -78,6 +78,43 @@ def dlp_tab():
     st.plotly_chart(px.histogram(pd.DataFrame(flat), x="type", color="likelihood",
                                  title="PII findings by type"))
 
+def ingestion_tab():
+    """The ledger, as the admin sees it (12 September 2026, deploy/INDEXING.md): every source's current version
+    and what its last reindex cost - chunks reused by hash against chunks embedded - the rows retired, the date
+    a document declares, and each tenant's corpus fingerprint (what the API's cache is keyed to). Read from
+    sources/ and ledger/, which the ingest worker writes on every event; the drift the nightly reconcile measures
+    is a log-based metric (alerts.tf) and pages on its own."""
+    st.subheader("Ingestion - the ledger")
+    rows = []
+    for s in _fs.collection("sources").stream():
+        d = s.to_dict() or {}
+        at = d.get("indexed_at")
+        rows.append({"tenant": d.get("tenant_id"), "document": (d.get("name") or "").split("/", 1)[-1],
+                     "status": d.get("status"), "chunks": d.get("chunks"), "reused": d.get("reused"),
+                     "embedded": d.get("embedded"), "retired": d.get("retired"),
+                     "effective_from": d.get("effective_from") or "",
+                     "embedding": f"{d.get('embedding_model') or '?'}@{d.get('embedding_version') or '?'}",
+                     "indexed": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, "strftime") else ""})
+    if not rows:
+        st.info("No sources yet: make ingest-corpus, or make backfill-current on a lane older than the ledger.")
+        return
+    df = pd.DataFrame(rows).sort_values(["tenant", "document"])
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Current versions", int((df["status"] == "indexed").sum()))
+    col2.metric("Retired sources", int((df["status"] == "retired").sum()))
+    col3.metric("Chunks reused (last reindexes)", int(df["reused"].fillna(0).sum()))
+    col4.metric("Chunks embedded (last reindexes)", int(df["embedded"].fillna(0).sum()))
+    st.dataframe(df, use_container_width=True)
+    for l in _fs.collection("ledger").stream():
+        d = l.to_dict() or {}
+        st.caption(f"{l.id}: corpus fingerprint {d.get('fingerprint')} over {d.get('versions')} current versions "
+                   f"(last event {d.get('last_event')})")
+    recent = df[df["reused"].notna()]
+    if not recent.empty:
+        st.plotly_chart(px.bar(recent, x="document", y=["reused", "embedded"], color="tenant", barmode="group",
+                               title="What the last reindex of each source cost: reused by hash vs embedded"))
+
+
 def list_tenants() -> list[str]:
     return sorted(t.id for t in _fs.collection("tenants").stream())
 
@@ -90,13 +127,13 @@ def admin_page(user):
     with tabs[1]: tenants_tab()
     with tabs[2]: audit_tab()
     with tabs[3]: dlp_tab()
+    with tabs[4]: ingestion_tab()
     # Stubs, deliberately visible. An empty tab that says which lesson fills it
     # is a roadmap; a tab that is missing entirely is a surprise in the demo.
     for i, (name, owner) in enumerate([
-            ("Ingestion", "12.5 - DLQ depth, duplicate rate, time-to-index"),
             ("Graph", "4.6 - entity/edge counts and orphaned nodes"),
             ("Cost", "12.6 - INR per tenant per day, from tenant_daily"),
             ("Quality", "10.4 - golden-set scores per prompt_version"),
-            ("Context & Memory", "8.6 - store size and recall hit rate")], start=4):
+            ("Context & Memory", "8.6 - store size and recall hit rate")], start=5):
         with tabs[i]:
             st.info(f"**{name}** lands in lesson {owner}.")

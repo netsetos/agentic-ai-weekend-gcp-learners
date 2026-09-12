@@ -209,6 +209,22 @@ the ingest image) and `reconcile.tf`'s 23:30 schedule (`RECONCILE_JOB=true`). `m
 [NAME=]` re-issues one document and waits for the worker's line; `make retire SOURCE=` flags one by hand;
 `evals/demo/` holds the rehearsal's two documents.
 
+Incremental indexing (12 September 2026, [`INDEXING.md`](INDEXING.md)) takes the ledger from document-level to
+chunk-level and makes it a system others can copy. The worker chunks a handbook *by section* (the same rule as
+`shared/documind_corpus.py`), stamps every row with `chunk_hash`, `locator`, `embedding_model@embedding_version`
+and `schema_version`, and *carries over* the previous version's vectors by hash - a one-clause edit of the
+283-chunk handbook embeds 2 chunks (`reused=281 embedded=2 retired=283` on the `ingest_ok` line). A new version
+lands *staged* and is *swapped* current in one pass while the old rows are retired with `expire_at`; a Firestore
+TTL policy (`firestore_indexes.tf`) is the only deleter on the lane, `retention_days` (variables.tf, 30) the
+window. An event older than the ledger's generation is acked as `ingest_stale_event`. The reconcile job is
+declared in `reconcile.tf` (`RECONCILE_JOB=true` once an image exists; `make reconcile-job` is an apply), ends
+on a `drift` number, and `alerts.tf` turns the lifecycle into metrics and three pagers. The API serves
+`GET /v1/sources` (the UI's Documents page renders it; `make sources` prints it), keys the cache to the
+tenant's corpus fingerprint (`ledger/{tenant}`, `cache_stale`), and `/version` names the embedding. A reindex
+is a release: `make reindex` runs the offline gate first, the golden set has a `version` shape (`vr-01`),
+`make eval-live SOURCE=` scopes the live gate to one document's rows, and `make smoke-reindex` is in
+`smoke-all`. Not yet: `make reembed` (a model migration) and an as-of filter - the strategy's next phase.
+
 Ingestion is the same in both: a Cloud Storage notification on the uploads bucket into the
 `documind-ingest` topic, a push subscription with an OIDC token, five attempts, then the DLQ
 (`eventarc.tf`). The worker sends PDFs to Document AI in 15-page slices, which is the online
@@ -320,9 +336,10 @@ deploy/
 │   ├── admin/            # admin dashboard + DLP + audit (12.3)
 │   ├── frontend/         # Streamlit app (12.4) — thin client over rag-api /v1/stream
 │   └── chat/             # LangChain tool loop (6.4); imports shared/ like the others
-├── shared/               # documind_tools.py — THE one retrieve(); see 8.7
-├── smoke/smoke.py        # live end-to-end smoke test (Tier B); smoke_mcp / smoke_chat / smoke_agent / smoke_media
-├── evals/                # the corpus (build_corpus.py, fetch_real.py, build_media.py), the golden set, run_eval.py
+├── shared/               # documind_tools.py — THE one retrieve(); see 8.7; documind_corpus.py — the loader the notebooks paste
+├── smoke/smoke.py        # live end-to-end smoke test (Tier B); smoke_mcp / smoke_chat / smoke_agent / smoke_media / smoke_reindex
+├── evals/                # the corpus (build_corpus.py, fetch_real.py, build_media.py), the golden set, run_eval.py; demo/ the rehearsal's versions
+├── INDEXING.md           # the document lifecycle: identities, carry-over, swap, retention, reconcile, the gates
 └── commands/             # reference gcloud/terraform blocks from the notebooks
 ```
 

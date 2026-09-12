@@ -3,11 +3,14 @@ import base64
 import json
 import logging
 import os
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
 from google import genai
 from google.genai import types as gtypes
+from google.api_core.exceptions import NotFound
 from google.cloud import firestore, storage
 from pydantic import BaseModel, ValidationError
 
@@ -16,11 +19,11 @@ from pydantic import BaseModel, ValidationError
 from shared.pii import inspect_image as pii_inspect_image, inspect_many as pii_inspect_many
 from shared.audit_log import emit as audit_emit
 
-from contracts import IngestMessage, DocumentContract, effective_from_of, sha256_of
-from idempotency import (claim, drop_tenant_cache, finish, reactivate, record_source, release,
-                         retire_previous, status_of)
-from indexer import (embed_all, mirror_to_bigquery, mirror_to_firestore, remove_datapoints,
-                     to_datapoints, upsert)
+from contracts import IngestMessage, DocumentContract, chunk_hash, effective_from_of, sha256_of
+from idempotency import (claim, finish, reactivate, record_source, refresh_fingerprint, release,
+                         retire_previous, stale_generation, status_of, swap_versions)
+from indexer import (EMBEDDING_MODEL, EMBEDDING_VERSION, embed_with_carry_over, mirror_to_bigquery,
+                     mirror_to_firestore, remove_datapoints, to_datapoints, upsert)
 from parser import parse
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
@@ -35,6 +38,11 @@ GEN_MODEL = os.environ.get("GEN_MODEL", "gemini-3.6-flash")
 # The SQL lane (5.5, gap G9): PROJECT.rag_data.chunk_source, declared by dataplex.tf. Unset
 # means the lane is off; the worker never needs BigQuery to index a document.
 BQ_CHUNK_TABLE = os.environ.get("BQ_CHUNK_TABLE", "")
+# Retention (12 September 2026): a retired row is stamped expire_at = now + RETENTION_DAYS, and the Firestore TTL
+# policy in firestore_indexes.tf deletes it after that - the only deleter on the lane. The number is variables.tf's
+# retention_days, passed by make deploy-services; it is the audit window and the undo window at once.
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
+STAGE_HOURS = 24            # a staged version nothing ever swapped expires by the same policy
 _bq = None
 
 
@@ -62,6 +70,12 @@ MAX_INLINE_PAGES = 250
 # 4.1's chunker, the shape every lesson's corpus has: ~500 tokens per chunk, an
 # overlap so a sentence is never cut in half between two chunks.
 CHUNK_CHARS, CHUNK_OVERLAP = 2000, 200
+# A handbook's sections (12 September 2026): the same two rules shared/documind_corpus.py chunks with, so the
+# lane and the notebooks mint the same chunk texts - and a chunk keeps its identity when a paragraph above it
+# changes. Fixed windows over a whole document do not: one inserted line at the top moved every window of the
+# handbook, and a re-issue that changed one clause reused none of its 92 windows. By section it reuses 281 of 283.
+_SECTION = re.compile(r"^## +(.+?) *$", re.M)
+_CODE = re.compile(r"^([A-Z][A-Z0-9]{0,7}(?:-[A-Z0-9]{1,6}){1,2})\b")   # NP-03, IT-SEC-04, MSA-04, GEN-014
 
 # The corpus has four modalities (Module 9) and ONE contract. An uploaded image, video or
 # audio file is not parsed for text - it is DESCRIBED, and the description is what gets
@@ -82,6 +96,10 @@ def _genai() -> genai.Client:
     return _gen
 
 
+def _expire_at(days: float) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(days=days)
+
+
 def _parse(content: bytes, content_type: str) -> tuple[str, int]:
     """(text, pages). Plain text needs no processor; everything else goes to Doc AI."""
     if content_type.startswith("text/"):
@@ -92,16 +110,9 @@ def _parse(content: bytes, content_type: str) -> tuple[str, int]:
     return parse(PROJECT, PROCESSOR_ID, content, content_type)
 
 
-def _chunk(text: str) -> list[dict]:
-    """Fixed windows with overlap, ending on a sentence when there is one nearby.
-
-    A text upload marks its page breaks with a form feed (the kit's real-document mirrors,
-    evals/fetch_real.py, do; so does _parse's page count), and a chunk that starts on page 7
-    is cited as page 7 - the same page_start shared/documind_corpus.py mints for the same
-    bytes in a notebook. Text without form feeds has no page to name, and None is more honest
-    than 1."""
+def _windows(text: str) -> list[tuple[int, str]]:
+    """Fixed windows with overlap, ending on a sentence when there is one nearby; (start offset, text)."""
     text = text.strip()
-    paged = "\f" in text
     out, start = [], 0
     while start < len(text):
         end = min(len(text), start + CHUNK_CHARS)
@@ -111,11 +122,51 @@ def _chunk(text: str) -> list[dict]:
                 end = cut + 1
         piece = text[start:end].strip()
         if piece:
-            out.append({"text": piece, "kind": "text",
-                        "page_start": text.count("\f", 0, start) + 1 if paged else None})
+            out.append((start, piece))
         if end >= len(text):
             break
         start = max(end - CHUNK_OVERLAP, start + 1)
+    return out
+
+
+def _chunk(text: str) -> list[dict]:
+    """A document into chunks, each with a LOCATOR that survives an edit above it.
+
+    A handbook - Markdown with `## ` headings - is one chunk per section, the clause code in the heading
+    (NP-03, IT-SEC-04) or the section's ordinal as the locator, a long section windowed within itself.
+    Anything else is fixed windows: a text upload marks its page breaks with a form feed (the kit's
+    real-document mirrors, evals/fetch_real.py, do; so does _parse's page count), a chunk that starts on
+    page 7 is cited as page 7 - the same page_start shared/documind_corpus.py mints for the same bytes in a
+    notebook - and its locator is the page and the window's ordinal on it (p7-1). Text without form feeds
+    has no page to name, and None is more honest than 1. Every chunk carries the hash of its text: the
+    carry-over in indexer.py matches on it, so a one-clause edit embeds one clause."""
+    text = text.strip()
+    heads = list(_SECTION.finditer(text))
+    out = []
+    if heads:
+        pre = text[:heads[0].start()].strip()
+        for k, (_, piece) in enumerate(_windows(pre)):
+            out.append({"text": piece, "kind": "text", "page_start": None,
+                        "locator": "preamble" + (f"-{k}" if k else ""), "section": None})
+        for n, h in enumerate(heads):
+            title = h.group(1).strip()
+            body = text[h.end(): heads[n + 1].start() if n + 1 < len(heads) else len(text)].strip()
+            code = _CODE.match(title)
+            key = code.group(1) if code else f"s{n + 1}"
+            for k, (_, piece) in enumerate(_windows(f"{title}\n{body}")):
+                out.append({"text": piece, "kind": "text", "page_start": None,
+                            "locator": key + (f"-{k}" if k else ""), "section": title})
+    else:
+        paged = "\f" in text
+        on_page: dict[int, int] = {}
+        for i, (start, piece) in enumerate(_windows(text)):
+            page = text.count("\f", 0, start) + 1 if paged else None
+            k = on_page.get(page, 0)
+            on_page[page] = k + 1
+            out.append({"text": piece, "kind": "text", "page_start": page,
+                        "locator": f"p{page}-{k}" if paged else f"w{i}", "section": None})
+    for c in out:
+        c["chunk_hash"] = chunk_hash(c["text"])
     return out
 
 
@@ -138,7 +189,9 @@ def _describe_media(gcs_uri: str, content_type: str) -> list[dict]:
                             "key facts it shows, then any table it contains as Markdown."],
             config=gtypes.GenerateContentConfig(
                 thinking_config=gtypes.ThinkingConfig(thinking_level="LOW")))
-        return [{"text": (r.text or "").strip(), "kind": "figure", "media_url": gcs_uri}]
+        text = (r.text or "").strip()
+        return [{"text": text, "kind": "figure", "media_url": gcs_uri, "locator": "figure",
+                 "chunk_hash": chunk_hash(text)}]
     audio = content_type.startswith("audio/")
     what = "recording" if audio else "video"
     shown = "what is said" if audio else "what is said and shown"
@@ -158,7 +211,8 @@ def _describe_media(gcs_uri: str, content_type: str) -> list[dict]:
                         f"percentage, amount and name that is spoken exactly as it is said."],
         config=gtypes.GenerateContentConfig(**config))
     return [{"text": s.summary, "kind": "segment", "media_url": gcs_uri,
-             "start": s.start, "end": s.end} for s in (r.parsed or [])]
+             "start": s.start, "end": s.end, "locator": f"t{int(s.start)}-{int(s.end)}",
+             "chunk_hash": chunk_hash(s.summary)} for s in (r.parsed or [])]
 
 
 def _enqueue_batch(doc: DocumentContract) -> None:
@@ -181,8 +235,24 @@ async def push(request: Request):
         log.warning(json.dumps({"event": "ingest_poison", "error": str(e)[:200]}))
         raise HTTPException(400, "unparseable message")
 
-    blob = _gcs.bucket(msg.bucket).blob(msg.name)
-    content = blob.download_as_bytes()
+    # THE GENERATION GUARD (12 September 2026). Push delivery is at-least-once and not in order: the event for an
+    # older generation of this object can arrive after the ledger has indexed a newer one. Acting on it would make
+    # the old version current again. So the ledger's generation is read first, and an older event is acked as
+    # stale - one line, nothing downloaded, nothing changed. The bytes are fetched BY GENERATION, never "whatever
+    # the object holds now": an event and its bytes are one version. A generation that is gone (overwritten,
+    # unversioned bucket) is the same case: the newer generation's own event indexes it.
+    older = stale_generation(_db, msg.tenant_id, msg.name, msg.generation)
+    if older:
+        log.info(json.dumps({"event": "ingest_stale_event", "tenant": msg.tenant_id, "name": msg.name,
+                             "generation": msg.generation, "ledger_generation": older, "reason": "older than the ledger"}))
+        return {"status": "stale", "generation": msg.generation, "ledger_generation": older}
+    blob = _gcs.bucket(msg.bucket).blob(msg.name, generation=int(msg.generation))
+    try:
+        content = blob.download_as_bytes()
+    except NotFound:
+        log.info(json.dumps({"event": "ingest_stale_event", "tenant": msg.tenant_id, "name": msg.name,
+                             "generation": msg.generation, "reason": "generation gone: the object was overwritten"}))
+        return {"status": "stale", "generation": msg.generation}
     doc = DocumentContract(tenant_id=msg.tenant_id, sha256=sha256_of(content),
                            gcs_uri=msg.gcs_uri, pages=0)
 
@@ -192,22 +262,26 @@ async def push(request: Request):
             # retired them: the chunks are still here, flagged. Flip them back, retire the newer
             # version in turn, and nothing is re-embedded - because nothing was ever deleted.
             back = reactivate(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
-            gone = retire_previous(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
+            gone = retire_previous(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key, expire_at=_expire_at(RETENTION_DAYS))
             if INDEX_NAME and gone["retired_ids"]:
                 remove_datapoints(INDEX_NAME, gone["retired_ids"])
             record_source(_db, doc.tenant_id, msg.name, doc.gcs_uri, doc.doc_key, msg.generation,
-                          doc.sha256, back, effective_from_of(msg.name, None))
-            drop_tenant_cache(_db, doc.tenant_id)
+                          doc.sha256, back, effective_from_of(msg.name, None),
+                          reused=back, embedded=0, retired=gone["retired_chunks"],
+                          embedding_model=EMBEDDING_MODEL, embedding_version=EMBEDDING_VERSION)
+            fingerprint = refresh_fingerprint(_db, doc.tenant_id, "ingest_reactivated")
             log.info(json.dumps({"event": "ingest_reactivated", "tenant": doc.tenant_id,
-                                 "doc_key": doc.doc_key, "chunks": back,
-                                 "retired": gone["retired_doc_keys"]}))
+                                 "doc_key": doc.doc_key, "chunks": back, "reused": back, "embedded": 0,
+                                 "retired": gone["retired_chunks"], "retired_doc_keys": gone["retired_doc_keys"],
+                                 "generation": msg.generation, "fingerprint": fingerprint}))
             return {"status": "reactivated", "doc_key": doc.doc_key, "chunks": back}
         # Already done by an earlier delivery, or by an earlier upload of the
         # same bytes. Returning 200 ACKS the message: this is a success, not a
         # failure, and retrying it would achieve nothing.
         return {"status": "duplicate", "doc_key": doc.doc_key}
 
-    gone = {"retired_doc_keys": [], "retired_ids": [], "retired_chunks": 0}
+    gone = {"activated": 0, "retired_doc_keys": [], "retired_ids": [], "retired_chunks": 0}
+    counts = {"reused": 0, "embedded": 0}
     try:
         image_findings = []
         if msg.content_type in MEDIA_TYPES:
@@ -258,34 +332,39 @@ async def push(request: Request):
                        meta={"types": sorted({f["info_type"] for f in findings}),
                              "count": len(findings)})
 
-        vectors = embed_all([c["text"] for c in chunks])
+        # THE CARRY-OVER (12 September 2026): the previous version's current chunks, matched by chunk_hash; their
+        # vectors are copied and only the changed chunks are embedded. The counts go on every line below.
+        vectors, counts = embed_with_carry_over(_db, doc, chunks)
+        # THE SWAP. The new version is written STAGED - current=false, invisible to every reader - and then one
+        # pass flips it current and retires the predecessor's rows (a flag, never a delete, expire_at set so the
+        # TTL policy purges them after RETENTION_DAYS). A reader between the two steps still finds exactly one
+        # version. The full profile's ANN tier follows: the new ids go up after the swap, the retired ids come out.
+        mirror_to_firestore(_db, doc, chunks, vectors, staged=True, stage_expire_at=_expire_at(STAGE_HOURS / 24))
+        gone = swap_versions(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key,
+                             expire_at=_expire_at(RETENTION_DAYS), effective_to=doc.effective_from)
         if INDEX_NAME:                       # the full profile; the lean one has no index
             upsert(INDEX_NAME, to_datapoints(doc, chunks, vectors))
-        mirror_to_firestore(_db, doc, chunks, vectors)
-        # THE LEDGER (11 September 2026). The new version is current from the line above; every
-        # other version of this object path is now retired - flagged, never deleted - so the index
-        # holds exactly one current reading of a document. A re-issued handbook replaces its
-        # predecessor instead of standing beside it, and a citation opens the page it quotes.
-        # After the write, never before: a reader between the two steps still finds a document.
-        gone = retire_previous(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
-        if INDEX_NAME and gone["retired_ids"]:
-            remove_datapoints(INDEX_NAME, gone["retired_ids"])
+            if gone["retired_ids"]:
+                remove_datapoints(INDEX_NAME, gone["retired_ids"])
         # The SQL lane reads the REAL chunks (5.5, gap G9): the same rows, with the verdict
         # the scan above just produced, so pii_flag in BigQuery is this worker's - never a
         # second scanner's that could disagree.
         mirror_to_bigquery(_bigquery() if BQ_CHUNK_TABLE else None, BQ_CHUNK_TABLE, doc, chunks,
                            {f["chunk_id"] for f in findings})
-        finish(_db, doc.doc_key, len(chunks))
+        finish(_db, doc.doc_key, len(chunks), counts, msg.generation)
         record_source(_db, doc.tenant_id, msg.name, doc.gcs_uri, doc.doc_key, msg.generation,
-                      doc.sha256, len(chunks), doc.effective_from)
-        # The cache follows the index: the tenant's pack record goes, the next answer runs uncached,
-        # make cache rebuilds the pack from the corpus that changed (12.6, 10.2).
-        drop_tenant_cache(_db, doc.tenant_id)
+                      doc.sha256, len(chunks), doc.effective_from,
+                      reused=counts["reused"], embedded=counts["embedded"], retired=gone["retired_chunks"],
+                      embedding_model=EMBEDDING_MODEL, embedding_version=EMBEDDING_VERSION)
+        # The cache follows the ledger: the tenant's corpus fingerprint changes, the API sees its cache record no
+        # longer matches and answers uncached, make cache rebuilds the pack from the corpus that changed (12.6, 10.2).
+        fingerprint = refresh_fingerprint(_db, doc.tenant_id, "ingest_ok")
         if gone["retired_chunks"]:
             log.info(json.dumps({"event": "ingest_superseded", "tenant": doc.tenant_id,
                                  "doc_key": doc.doc_key, "gcs_uri": doc.gcs_uri,
                                  "retired_doc_keys": gone["retired_doc_keys"],
-                                 "retired_chunks": gone["retired_chunks"]}))
+                                 "retired_chunks": gone["retired_chunks"],
+                                 "expire_days": RETENTION_DAYS, "effective_to": doc.effective_from}))
 
         # The document is now retrievable. Record that, with who and what - the
         # upload event the audit trail is missing without it.
@@ -295,7 +374,9 @@ async def push(request: Request):
                            "tenant_id": doc.tenant_id},
                    meta={"gcs_uri": doc.gcs_uri, "pages": doc.pages,
                          "chunks": len(chunks), "pii": bool(findings),
-                         "kinds": sorted({c["kind"] for c in chunks})})
+                         "kinds": sorted({c["kind"] for c in chunks}),
+                         "reused": counts["reused"], "embedded": counts["embedded"],
+                         "retired": gone["retired_chunks"]})
     except Exception as e:
         # Give the claim back before failing, or the retry finds the document
         # already claimed and does nothing - for ever. And SAY what failed, on the log
@@ -310,5 +391,7 @@ async def push(request: Request):
     log.info(json.dumps({"event": "ingest_ok", "tenant": doc.tenant_id,
                          "doc_key": doc.doc_key, "chunks": len(chunks),
                          "pages": pages, "kinds": sorted({c["kind"] for c in chunks}),
-                         "retired": gone["retired_chunks"], "effective_from": doc.effective_from}))
-    return {"status": "indexed", "chunks": len(chunks)}
+                         "reused": counts["reused"], "embedded": counts["embedded"],
+                         "retired": gone["retired_chunks"], "generation": msg.generation,
+                         "effective_from": doc.effective_from, "fingerprint": fingerprint}))
+    return {"status": "indexed", "chunks": len(chunks), "reused": counts["reused"], "embedded": counts["embedded"]}

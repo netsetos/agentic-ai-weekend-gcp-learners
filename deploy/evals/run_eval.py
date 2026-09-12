@@ -3,6 +3,7 @@
 
     python deploy/evals/run_eval.py                    # OFFLINE - no credentials, no cost
     python deploy/evals/run_eval.py --api-url URL      # LIVE    - needs a deployment
+    python deploy/evals/run_eval.py --api-url URL --source hr_policy_2026.md   # LIVE, scoped to the rows citing one document
 
 Two modes, because the gate has two halves that fail for different reasons and one of
 them must run on every pull request.
@@ -17,6 +18,11 @@ It checks the golden set itself:
                   CI runs. Those differ the moment somebody edits golden.jsonl by hand
                   to make a red build go green - which is the single most common way an
                   eval suite rots.
+                  A `version` row (12 September 2026) is the ledger's: its must_contain is
+                  the CURRENT version's figure, its must_not_contain a figure only a retired
+                  version under evals/demo holds. It is what forces the rows to move with
+                  the document, in the same commit: re-issue the handbook without moving
+                  lk-06 and vr-01 and this check turns red before anything is deployed.
     anchors       every must_retrieve anchor is findable. evals/README.md left one
                   decision to this lesson: 12.5 mints chunk ids as {tenant}:{sha256}#{i}, which
                   contains neither the document slug nor the clause id, so the runner
@@ -41,6 +47,12 @@ LIVE sends EVERY row, not only the answerable ones - see live(). Scoring only th
 answerable subset silently skipped all five refusal rows and four of the five isolation
 rows, which is how a gate reports green over tests it never ran.
 
+--source scopes the live half to the rows that cite one document (a slug in must_retrieve,
+or the row's own `source`): a reindex is a release (deploy/INDEXING.md), and this is its
+gate on a candidate - minutes, not the ten of the full set. A threshold with no rows in
+scope is reported and not judged; a `version` row that cites a retired figure is a stale
+answer and blocks on its own.
+
 The threshold that matters live is NOT must_not_contain. Read WHY in check_isolation().
 """
 from __future__ import annotations
@@ -55,6 +67,7 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus")
+DEMO = os.path.join(HERE, "demo")          # the rehearsal's retired versions: what a version row's must_not_contain lives in
 GOLDEN = os.path.join(HERE, "golden.jsonl")
 
 # What a green run has to clear. Numbers, in one place, so raising a threshold is a
@@ -66,7 +79,7 @@ THRESHOLDS = {
     "refusal_rate": 0.90,       # of rows the corpus CANNOT answer, how many were refused
     "isolation_403_rate": 1.00, # not 0.99. One leak is the whole product.
 }
-MIN_ROWS = {"isolation": 5, "refusal": 5, "lookup": 10, "join": 5}
+MIN_ROWS = {"isolation": 5, "refusal": 5, "lookup": 10, "join": 5, "version": 1}
 
 
 TEXT_FILES = (".md", ".txt")
@@ -93,6 +106,15 @@ def load_corpus() -> dict[str, dict[str, str]]:
     return out
 
 
+def load_demo() -> str:
+    """Every retired version the rehearsal keeps under evals/demo, lower-cased: the text a version row's
+    must_not_contain must live in, or the row asserts a staleness nothing could produce."""
+    if not os.path.isdir(DEMO):
+        return ""
+    return "\n".join(open(os.path.join(DEMO, fn), encoding="utf-8").read()
+                     for fn in sorted(os.listdir(DEMO)) if fn.endswith(TEXT_FILES)).lower()
+
+
 def load_golden() -> list[dict]:
     with open(GOLDEN, encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
@@ -111,10 +133,27 @@ def haystack(corpus: dict, tenant: str) -> str:
     return "\n".join(f"{name}\n{text}" for name, text in docs.items()).lower()
 
 
+def sources_of(row: dict, corpus: dict) -> set[str]:
+    """The documents a row cites: the must_retrieve anchors that are document slugs in the row's tenant's corpus
+    (a clause code is not a document), plus the row's own `source` when it names one."""
+    slugs = {name.rsplit(".", 1)[0] for name in corpus.get(row["tenant"], {})}
+    out = {a for a in row.get("must_retrieve", []) if a in slugs}
+    if row.get("source"):
+        out.add(row["source"].rsplit("/", 1)[-1].rsplit(".", 1)[0])
+    return out
+
+
+def in_scope(row: dict, source: str | None, corpus: dict) -> bool:
+    if not source:
+        return True
+    return source.rsplit("/", 1)[-1].rsplit(".", 1)[0] in sources_of(row, corpus)
+
+
 # ------------------------------------------------------------------ offline checks
 def check_falsifiable(golden: list[dict], corpus: dict) -> list[str]:
     """A test that cannot fail is not a test. Prove each assertion could."""
     bad = []
+    demo = load_demo()
     for row in golden:
         own = haystack(corpus, row["tenant"])
         # build_golden.py enforces these when it WRITES the file. Re-assert them over the
@@ -130,6 +169,24 @@ def check_falsifiable(golden: list[dict], corpus: dict) -> list[str]:
             if want.lower() not in own:
                 bad.append(f"{row['id']}: must_contain {want!r} is not in "
                            f"{row['tenant']}'s corpus - the row can only fail")
+        if row["shape"] == "version":
+            # The ledger's row. The figure it forbids must be ABSENT from the current version of its source
+            # (or a correct answer fails) and PRESENT in a retired version under evals/demo (or nothing
+            # stale could ever produce it). Re-issue the document without moving the row, and this is red.
+            src = (row.get("source") or "").rsplit("/", 1)[-1]
+            current = corpus.get(row["tenant"], {}).get(src, "").lower()
+            if not src or not current:
+                bad.append(f"{row['id']}: a version row must name a text document of its tenant as `source`")
+            if not row.get("must_not_contain"):
+                bad.append(f"{row['id']}: a version row with no must_not_contain asserts nothing about staleness")
+            for never in row.get("must_not_contain", []):
+                if never.lower() in current:
+                    bad.append(f"{row['id']}: must_not_contain {never!r} IS in the current version of "
+                               f"{src} - the row fails on a correct answer; move the row with the document")
+                if never.lower() not in demo:
+                    bad.append(f"{row['id']}: must_not_contain {never!r} is in no retired version under "
+                               f"evals/demo - nothing stale holds it, so the row is decoration")
+            continue
         for never in row.get("must_not_contain", []):
             if never.lower() in own:
                 bad.append(f"{row['id']}: must_not_contain {never!r} IS in "
@@ -284,8 +341,14 @@ def check_isolation(api_url, golden, token, outsider_token=None) -> tuple[float,
     return (got / len(rows) if rows else 0.0), bad
 
 
-def live(api_url: str) -> int:
-    golden = load_golden()
+def live(api_url: str, source: str | None = None) -> int:
+    corpus = load_corpus()
+    golden = [r for r in load_golden() if in_scope(r, source, corpus)]
+    if source:
+        print(f"  scoped to {source}: {len(golden)} row(s) cite it")
+        if not golden:
+            print("  no golden row cites this document - the gate has nothing to judge; add a row before the reindex")
+            return 1
     token = os.environ.get("DOCUMIND_ID_TOKEN") or None
     outsider_token = os.environ.get("DOCUMIND_OUTSIDER_TOKEN") or None
     member = os.environ.get("DOCUMIND_USER_EMAIL", "eval@documind.in")
@@ -302,9 +365,11 @@ def live(api_url: str) -> int:
     # unanswerable question would have scored a clean 100%.
     answerable_rows = [r for r in golden if r["answerable"]]
     unanswerable_rows = [r for r in golden if not r["answerable"]]
+    isolation_rows = [r for r in golden if r["shape"] == "isolation"]
     answered = cited = contained = refused = 0
     kind_rows = kind_hits = 0   # must_cite_kind (Module 9): reported beside the thresholds, not one of them
     leaks = []
+    stale = []       # a version row that cited a retired figure: the ledger's promise broken, or a row that did not move
     misses = []      # every row that cost a point, with what the API said - the first live
                      # run printed five rates and left the eighteen refused rows to guesswork
     for row in golden:
@@ -315,10 +380,10 @@ def live(api_url: str) -> int:
         text = normalise(body.get("answer") or "")
 
         # must_not_contain is checked on EVERY 200, whatever the row's shape. A leak in a
-        # refusal row is the same leak.
+        # refusal row is the same leak; a retired figure in a version row is a stale answer.
         for never in row.get("must_not_contain", []):
             if normalise(never) in text:
-                leaks.append(f"{row['id']}: answer contained {never!r}")
+                (stale if row["shape"] == "version" else leaks).append(f"{row['id']}: answer contained {never!r}")
 
         if row["answerable"]:
             if body.get("answerable"):
@@ -348,27 +413,32 @@ def live(api_url: str) -> int:
             else:
                 misses.append(f"{row['id']:6} {row['shape']:8} {row['tenant']:7} ANSWERED (should refuse) | {text[:80]!r}")
 
-    n = len(answerable_rows) or 1
-    u = len(unanswerable_rows) or 1
+    n = len(answerable_rows)
+    u = len(unanswerable_rows)
     iso_rate, iso_bad = check_isolation(api_url, golden, token, outsider_token)
     scores = {
-        "answerable_rate": answered / n,
+        "answerable_rate": answered / n if n else 0.0,
         "citation_rate": cited / max(answered, 1),
         "must_contain_rate": contained / max(answered, 1),
-        "refusal_rate": refused / u,
+        "refusal_rate": refused / u if u else 0.0,
         "isolation_403_rate": iso_rate,
     }
-    missed = {k for k, v in THRESHOLDS.items() if scores[k] < v}
+    # A threshold with no rows behind it is not judged: a scoped run (--source) may hold no refusal or isolation
+    # row, and 0 of 0 refused is not a failing rate - it is an absence, and it is printed as one.
+    rows_behind = {"answerable_rate": n, "citation_rate": answered, "must_contain_rate": answered,
+                   "refusal_rate": u, "isolation_403_rate": len(isolation_rows)}
+    judged = {k for k in THRESHOLDS if rows_behind[k] > 0}
+    missed = {k for k in judged if scores[k] < THRESHOLDS[k]}
     failures = [f"{k}: {scores[k]:.0%} < {THRESHOLDS[k]:.0%}" for k in sorted(missed)]
 
     print(f"  {len(golden)} rows ({len(answerable_rows)} answerable, {len(unanswerable_rows)} not) against {api_url}\n")
     for k, v in scores.items():
-        print(f"  {'[FAIL]' if k in missed else '[PASS]'} "
-              f"{k:20} {v:6.1%}  (threshold {THRESHOLDS[k]:.0%})")
+        tag = "[FAIL]" if k in missed else ("[PASS]" if k in judged else "[ -- ]")
+        print(f"  {tag} {k:20} {v:6.1%}  (threshold {THRESHOLDS[k]:.0%}{'' if k in judged else '; no rows in scope'})")
     if kind_rows:
         print(f"  [info] {'media_kind_rate':20} {kind_hits / kind_rows:6.1%}  ({kind_hits}/{kind_rows} rows asked for a "
               f"figure or segment citation; not a threshold - 0 means the media is not ingested)")
-    for line in iso_bad + leaks:
+    for line in iso_bad + leaks + stale:
         print(f"         {line}")
     if misses:
         print(f"\n  rows that cost a point ({len(misses)}):")
@@ -381,6 +451,10 @@ def live(api_url: str) -> int:
         print("  A must_not_contain row fired. That should be near-impossible given "
               "the retrieval filter, which makes it MORE serious, not less.")
         return 2
+    if stale:
+        print("  A version row cited a RETIRED figure. Either the ledger served a version it should have retired, or "
+              "the document was re-issued and the golden rows did not move with it. Blocked.")
+        failures.append("stale: a retired version was cited")
     if failures:
         print(f"  Blocked: {'; '.join(failures)}")
         return 1
@@ -391,12 +465,21 @@ def live(api_url: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--api-url", help="run the LIVE half against this deployment")
+    ap.add_argument("--source", help="scope the live half to the rows citing this document (a name or slug); "
+                                     "offline, list them")
     args = ap.parse_args()
     if args.api_url:
         print("== eval gate: LIVE ==")
-        return live(args.api_url)
+        return live(args.api_url, args.source)
     print("== eval gate: OFFLINE (no credentials, no cost) ==")
-    return offline()
+    rc = offline()
+    if args.source:
+        corpus = load_corpus()
+        rows = [r for r in load_golden() if in_scope(r, args.source, corpus)]
+        print(f"\n  rows citing {args.source}: {len(rows)} - the scoped live gate judges these")
+        for r in rows:
+            print(f"    {r['id']:6} {r['shape']:9} {r['question'][:72]}")
+    return rc
 
 
 if __name__ == "__main__":

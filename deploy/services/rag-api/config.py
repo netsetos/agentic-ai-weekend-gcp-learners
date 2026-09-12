@@ -23,7 +23,13 @@ class Settings(BaseSettings):
     # teaching lane and the production lane never saw the same documents. Every notebook
     # from 2.3 onward now names this one. services/ingest/indexer.py writes to it.
     chunks_collection: str = "chunks"
-    embed_model: str = "text-embedding-005"
+    # ONE declared embedding (12 September 2026): EMBEDDING_MODEL and EMBEDDING_VERSION are variables.tf's
+    # embedding_model / embedding_version, set on this service AND on the ingest worker by make deploy-services,
+    # so the query vector and the document vectors come from one model by construction. The worker stamps the
+    # pair on every chunk row; a bump is a planned migration (make reembed, deploy/INDEXING.md), never a silent
+    # mismatch. /version reports it beside the model and the prompt.
+    embed_model: str = Field("text-embedding-005", alias="EMBEDDING_MODEL")
+    embedding_version: str = Field("1", alias="EMBEDDING_VERSION")
     # GENERATOR_MODEL in the environment. A model NAME is served on the global endpoint; a tuned model is
     # an ENDPOINT path (projects/.../locations/us-central1/endpoints/...) and is served on a regional
     # client - generator.py picks by the value (10.1: tuning is regional). RAG_MODEL_BASE names the base

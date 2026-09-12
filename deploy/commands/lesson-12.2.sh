@@ -22,6 +22,8 @@
 # the budget breaker on the request path; BUDGET_USD is the month's cap; SPEND_PCT overrides the reading.
 # 12.5's ledger (11 September 2026): RETRIEVAL_CURRENT_ONLY=on retrieves only chunks the ledger marks current -
 # after the second vector index is built and make backfill-current has run; a candidate first, like every switch.
+# 12 September 2026 (deploy/INDEXING.md): EMBEDDING_MODEL / EMBEDDING_VERSION are the one declared embedding - the same
+# pair the ingest worker stamps on every chunk row, so the query vector and the document vectors come from one model.
 # Module 12 (12.6): THE GUARD IS A SWITCH. ARMOR=on screens the prompt before retrieval and the buffered answer after
 # it against the Model Armor template (asia-south1, with the data it inspects); off on the lane, on for the candidate
 # 12.6 judges - make candidate ARMOR=on.
@@ -37,7 +39,7 @@ gcloud run deploy documind-api \
   --min-instances=0 --max-instances=20 \
   --cpu-boost --execution-environment=gen2 \
   --service-account=documind-api-sa@$PROJECT.iam.gserviceaccount.com \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RETRIEVAL_BACKEND=${RETRIEVAL_BACKEND:-firestore}|VECTOR_INDEX_ENDPOINT=$VECTOR_INDEX_ENDPOINT|VECTOR_DEPLOYED_INDEX_ID=$VECTOR_DEPLOYED_INDEX_ID|SELF_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-ui,/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-chat|DEMO_MODE=${DEMO_MODE-1}|UPLOAD_BUCKET=$PROJECT-uploads|MEDIA_BUCKET=$PROJECT-media|AUDIT_BUCKET=$PROJECT-audit|GENERATOR_MODEL=${GENERATOR_MODEL-gemini-3.6-flash}|RAG_MODEL_BASE=${RAG_MODEL_BASE-gemini-3.6-flash}|ROUTING=${ROUTING-off}|BUDGET_USD=${BUDGET_USD-100}${SPEND_PCT:+|SPEND_PCT=$SPEND_PCT}|MODEL_BACKEND=${MODEL_BACKEND-vertex}|LITELLM_URL=https://documind-gateway-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|ARMOR=${ARMOR-off}|ARMOR_LOCATION=${ARMOR_LOCATION-asia-south1}|ARMOR_TEMPLATE=${ARMOR_TEMPLATE-documind-guard}|RETRIEVAL_CURRENT_ONLY=${RETRIEVAL_CURRENT_ONLY-off}|GIT_SHA=$GIT_SHA" \
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RETRIEVAL_BACKEND=${RETRIEVAL_BACKEND:-firestore}|VECTOR_INDEX_ENDPOINT=$VECTOR_INDEX_ENDPOINT|VECTOR_DEPLOYED_INDEX_ID=$VECTOR_DEPLOYED_INDEX_ID|SELF_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-ui,/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-chat|DEMO_MODE=${DEMO_MODE-1}|UPLOAD_BUCKET=$PROJECT-uploads|MEDIA_BUCKET=$PROJECT-media|AUDIT_BUCKET=$PROJECT-audit|GENERATOR_MODEL=${GENERATOR_MODEL-gemini-3.6-flash}|RAG_MODEL_BASE=${RAG_MODEL_BASE-gemini-3.6-flash}|ROUTING=${ROUTING-off}|BUDGET_USD=${BUDGET_USD-100}${SPEND_PCT:+|SPEND_PCT=$SPEND_PCT}|MODEL_BACKEND=${MODEL_BACKEND-vertex}|LITELLM_URL=https://documind-gateway-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|ARMOR=${ARMOR-off}|ARMOR_LOCATION=${ARMOR_LOCATION-asia-south1}|ARMOR_TEMPLATE=${ARMOR_TEMPLATE-documind-guard}|RETRIEVAL_CURRENT_ONLY=${RETRIEVAL_CURRENT_ONLY-off}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}|GIT_SHA=$GIT_SHA" \
   --vpc-connector=projects/$PROJECT/locations/${REGION:-us-central1}/connectors/documind-vpc \
   --vpc-egress=private-ranges-only
 

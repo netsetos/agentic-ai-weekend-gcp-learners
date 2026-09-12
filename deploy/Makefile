@@ -13,7 +13,8 @@
 #     make smoke DOCUMIND_API_URL=https://...       end-to-end smoke test
 #     make trainset / cache / judge / tune / candidate   Module 10: the dataset, the tenant cache, the second judge,
 #                                                   the managed tuning job, a no-traffic revision for the A/B
-#     make eval-live PROJECT=...                    the golden set against the deployed API
+#     make eval-live PROJECT=... [SOURCE=<doc>]     the golden set against the deployed API (scoped to one document's rows)
+#     make reindex FILE= NAME= / sources / purge     the document lifecycle (deploy/INDEXING.md); smoke-reindex smokes it
 #     make down  PROJECT=...                        destroy everything (no cost bleed)
 #
 # PROFILE=lean (the default) is the Module 4 lane: the API, the UI and the ingest worker on
@@ -89,6 +90,13 @@ DEPLOY_REF      ?= refs/heads/main
 # vector index is built and make backfill-current has run; RECONCILE_JOB=true schedules the nightly reconcile
 RETRIEVAL_CURRENT_ONLY ?= off
 RECONCILE_JOB   ?= false
+# 12 September 2026 (deploy/INDEXING.md): the retention window a retired chunk row lives for (the TTL policy's
+# number, variables.tf), the ONE declared embedding both the worker and the API run (variables.tf), and the ingest
+# image the nightly job runs (reconcile.tf declares the job; make reconcile-job is an apply with the switch on).
+RETENTION_DAYS    ?= 30
+EMBEDDING_MODEL   ?= text-embedding-005
+EMBEDDING_VERSION ?= 1
+RECONCILE_IMAGE   ?= $(IMAGE_REPO)/ingest:$(GIT_SHA)
 
 # Three variables are declared with no default - project_id, billing_account_id and
 # github_repository_id - so terraform stops and PROMPTS for any one that is not passed.
@@ -121,7 +129,11 @@ TF_VARS = -var project_id=$(PROJECT) \
           -var github_repository_id=$(GITHUB_REPO_ID) \
           -var 'alert_emails=$(ALERT_EMAILS_JSON)' \
           -var deploy_ref=$(DEPLOY_REF) \
-          -var reconcile_job=$(RECONCILE_JOB)
+          -var reconcile_job=$(RECONCILE_JOB) \
+          -var reconcile_image=$(RECONCILE_IMAGE) \
+          -var retention_days=$(RETENTION_DAYS) \
+          -var embedding_model=$(EMBEDDING_MODEL) \
+          -var embedding_version=$(EMBEDDING_VERSION)
 TF_INIT = terraform init -input=false -reconfigure \
           -backend-config="bucket=$(TFSTATE_BUCKET)" \
           -backend-config="prefix=$(TFSTATE_PREFIX)"
@@ -146,7 +158,7 @@ SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-
         deploy-gateway gateway-off smoke-gateway smoke-slm build-vllm deploy-vllm vllm-off gke-up gke-down compare \
         gpu-quota gpu-cap gpu-cap-off off off-now \
         release-candidate promote rollback smoke-all usage ingest-one poison dlq \
-        reindex retire reconcile reconcile-job backfill-current
+        reindex retire reconcile reconcile-job backfill-current sources purge smoke-reindex
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -269,6 +281,9 @@ deploy-services: guard-project
 	PROJECT_NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	DOCAI_PROCESSOR_ID=$$(cd $(TF_DIR) && terraform output -raw docai_processor_id); \
 	DOCAI_LOCATION=$$(cd $(TF_DIR) && terraform output -raw docai_location); \
+	RETENTION_DAYS=$$(cd $(TF_DIR) && terraform output -raw retention_days 2>/dev/null || echo $(RETENTION_DAYS)); \
+	EMBEDDING_MODEL=$$(cd $(TF_DIR) && terraform output -raw embedding_model 2>/dev/null || echo $(EMBEDDING_MODEL)); \
+	EMBEDDING_VERSION=$$(cd $(TF_DIR) && terraform output -raw embedding_version 2>/dev/null || echo $(EMBEDDING_VERSION)); \
 	if [ "$(PROFILE)" = full ]; then \
 	  RETRIEVAL_BACKEND=vector; \
 	  VECTOR_INDEX_ENDPOINT=$$(cd $(TF_DIR) && terraform output -raw vector_index_endpoint); \
@@ -295,6 +310,7 @@ deploy-services: guard-project
 	  CHAT_SQL_FLAGS="$$CHAT_SQL_FLAGS" CHAT_EXTRA_ENV="$$CHAT_EXTRA_ENV" \
 	  GENERATOR_MODEL=$(GENERATOR_MODEL) RAG_MODEL_BASE=$(RAG_MODEL_BASE) ROUTING=$(ROUTING) MODEL_BACKEND=$(MODEL_BACKEND) ARMOR=$(ARMOR) \
   RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY) \
+	  RETENTION_DAYS=$$RETENTION_DAYS EMBEDDING_MODEL=$$EMBEDDING_MODEL EMBEDDING_VERSION=$$EMBEDDING_VERSION \
 	  BUDGET_USD=$(BUDGET_USD) SPEND_PCT=$(SPEND_PCT) \
 	  sh -ec "$$(sed -n '/^# ---- DEPLOY ----/,/^# ---- [A-Z_]* ----$$/p' $$f | grep -v '^# ----')"; \
 	done
@@ -389,7 +405,7 @@ eval-live: guard-project
 	OUTSIDER=$${DOCUMIND_OUTSIDER_TOKEN:-$$(gcloud auth print-identity-token --include-email \
 	  --impersonate-service-account=documind-outsider-sa@$(PROJECT).iam.gserviceaccount.com --audiences=$$AUD)}; \
 	echo ">> $$API"; DOCUMIND_ID_TOKEN=$$TOKEN DOCUMIND_OUTSIDER_TOKEN=$$OUTSIDER \
-	  $(PY) evals/run_eval.py --api-url $$API
+	  $(PY) evals/run_eval.py --api-url $$API $(if $(SOURCE),--source $(SOURCE),)
 
 # The ablation harness (4.8, Part 5): retrieval only, no model in the loop, one knob per arm -
 # the lane's dense 20 -> rerank 5 against the same without the reranker, a deeper candidate
@@ -703,7 +719,7 @@ rollback: guard-project
 # that answers everybody passes a smoke made only of "does it work?".
 smoke-all: guard-project
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); rc=0; \
-	for t in smoke smoke-mcp smoke-chat smoke-agent smoke-media smoke-gateway smoke-slm; do echo "== $$t"; \
+	for t in smoke smoke-mcp smoke-chat smoke-agent smoke-media smoke-reindex smoke-gateway smoke-slm; do echo "== $$t"; \
 	  DOCUMIND_PROJECT=$(PROJECT) DOCUMIND_API_URL=https://documind-api-$$NUMBER.$(REGION).run.app DOCUMIND_TENANT=$(TENANT) \
 	  DOCUMIND_IMPERSONATE_SA=documind-ui-sa@$(PROJECT).iam.gserviceaccount.com $(MAKE) --no-print-directory $$t PROJECT=$(PROJECT) 2>&1 | grep -E "PASS|FAIL|pass|fail|not set" || rc=1; done; exit $$rc
 
@@ -736,12 +752,15 @@ dlq: guard-project
 # evals/demo/hr_policy_2026_v2.md AS hr_policy_2026.md) and waits for the worker's line - ingest_ok with the
 # retired count, or ingest_reactivated when the bytes are a version the ledger had retired (the undo).
 reindex: guard-project
-	@test -n "$(FILE)" || (echo "FILE=<path> is required (TENANT=$(TENANT), NAME=<object name, default the basename>)"; exit 2); SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); OBJ=$(if $(NAME),$(NAME),$$(basename "$(FILE)")); \
+	@test -n "$(FILE)" || (echo "FILE=<path> is required (TENANT=$(TENANT), NAME=<object name, default the basename>)"; exit 2); OBJ=$(if $(NAME),$(NAME),$$(basename "$(FILE)")); \
+	$(PY) evals/run_eval.py --source $$OBJ >/dev/null || (echo ">> the golden set is not sound: a reindex is a release, and the rows move with the document in the same commit - python evals/run_eval.py"; exit 1); \
+	SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
 	gcloud storage cp "$(FILE)" gs://$(PROJECT)-uploads/$(TENANT)/$$OBJ && echo ">> gs://$(PROJECT)-uploads/$(TENANT)/$$OBJ - waiting for the worker (up to 5 min)"; \
 	for i in $$(seq 1 30); do sleep 10; \
-	  LINE=$$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND (jsonPayload.event=\"ingest_ok\" OR jsonPayload.event=\"ingest_reactivated\") AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.event,jsonPayload.doc_key,jsonPayload.chunks,jsonPayload.retired,jsonPayload.effective_from)'); \
-	  if [ -n "$$LINE" ]; then echo ">> $$LINE"; \
-	    gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND jsonPayload.event=\"ingest_superseded\" AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.retired_doc_keys,jsonPayload.retired_chunks)' | sed 's/^/>> retired: /'; exit 0; fi; done; echo ">> no ingest line in 5 min - gcloud logging read ... service_name=documind-ingest"; exit 1
+	  LINE=$$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND (jsonPayload.event=\"ingest_ok\" OR jsonPayload.event=\"ingest_reactivated\") AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.event,jsonPayload.doc_key,jsonPayload.chunks,jsonPayload.reused,jsonPayload.embedded,jsonPayload.retired,jsonPayload.effective_from)'); \
+	  if [ -n "$$LINE" ]; then echo ">> event doc_key chunks reused embedded retired effective_from"; echo ">> $$LINE"; \
+	    gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND jsonPayload.event=\"ingest_superseded\" AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.retired_doc_keys,jsonPayload.retired_chunks,jsonPayload.expire_days)' | sed 's/^/>> retired (doc_keys, chunks, expire days): /'; \
+	    echo ">> the gate, scoped to this document, on a candidate: make eval-live PROJECT=$(PROJECT) SOURCE=$$OBJ API=<candidate url>"; exit 0; fi; done; echo ">> no ingest line in 5 min - gcloud logging read ... service_name=documind-ingest"; exit 1
 
 # retire a source by hand (SOURCE=acme/old.pdf or a gs:// URI): every current chunk of it is flagged, the ledger
 # row says retired, the tenant's cache record goes. Uploading the bytes again reactivates them.
@@ -760,9 +779,25 @@ backfill-current: guard-project
 
 # the nightly job, from the ingest image the lane already runs; then RECONCILE_JOB=true on the next make plan
 # schedules it (reconcile.tf) at 23:30 IST, after documind-off.
+reconcile-job: RECONCILE_JOB = true
 reconcile-job: guard-project
-	gcloud run jobs deploy documind-reconcile --image $(IMAGE_REPO)/ingest:$(GIT_SHA) --region $(REGION) --project $(PROJECT) \
-	  --service-account documind-ingest-sa@$(PROJECT).iam.gserviceaccount.com \
-	  --set-env-vars GOOGLE_CLOUD_PROJECT=$(PROJECT),AUDIT_BUCKET=$(PROJECT)-audit \
-	  --command python --args reconcile.py,--project,$(PROJECT),--apply --max-retries 0 --task-timeout 1200 --quiet
-	@echo ">> documind-reconcile: gcloud run jobs execute documind-reconcile --region $(REGION) to run it now; RECONCILE_JOB=true on make plan to schedule it"
+	cd $(TF_DIR) && $(TF_INIT) && terraform apply -input=false -auto-approve $(TF_VARS)
+	@echo ">> documind-reconcile declared on $(RECONCILE_IMAGE) and scheduled 23:30 IST (reconcile.tf); gcloud run jobs execute documind-reconcile --region $(REGION) --project $(PROJECT) runs it now"
+	@echo ">> keep RECONCILE_JOB=true on every later make plan / make up, or the next apply removes the job and its schedule"
+
+# the versions view from the shell: every source's current version, generation, what the last reindex cost, the date
+# it declares, the corpus fingerprint - the rows GET /v1/sources serves and the UI's Documents page renders.
+sources: guard-project
+	$(PY) services/ingest/reconcile.py --project $(PROJECT) --report $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(JSON),--json,)
+
+# the manual twin of the TTL policy (firestore_indexes.tf): retired rows past expire_at. Prints; APPLY=1 deletes. On a
+# lane with the policy applied it finds nothing to do, which is the point of running it once.
+purge: guard-project
+	$(PY) services/ingest/reconcile.py --project $(PROJECT) --purge $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
+
+# the document lifecycle, smoked like every surface: a small fixture in twice under one name (reindexed with the
+# carry-over counts, the answer moved), then version 1 again (reactivated, nothing embedded, the answer back).
+smoke-reindex: guard-project
+	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
+	DOCUMIND_PROJECT=$(PROJECT) DOCUMIND_API_URL=$${DOCUMIND_API_URL:-https://documind-api-$$NUMBER.$(REGION).run.app} DOCUMIND_TENANT=$(TENANT) \
+	DOCUMIND_IMPERSONATE_SA=$${DOCUMIND_IMPERSONATE_SA:-documind-ui-sa@$(PROJECT).iam.gserviceaccount.com} $(PY) smoke/smoke_reindex.py

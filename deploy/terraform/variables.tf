@@ -69,3 +69,45 @@ variable "residency" {
     error_message = "residency must be india or us."
   }
 }
+
+# The document lifecycle (12 September 2026, deploy/INDEXING.md). ONE embedding, declared once: the ingest
+# worker stamps the pair on every chunk row and rag-api embeds every query with it. make deploy-services reads
+# the two outputs below into both services' environments (EMBEDDING_MODEL, EMBEDDING_VERSION), so a query
+# vector from one model against document vectors from another cannot happen by drift - a bump is a plan, an
+# apply, a rebuild and a reindex (make reembed, the strategy's next phase).
+variable "embedding_model" {
+  type    = string
+  default = "text-embedding-005"
+}
+
+variable "embedding_version" {
+  type    = string
+  default = "1"
+}
+
+# How long a retired chunk row stays before the TTL policy in firestore_indexes.tf removes it: the audit window
+# and the undo window. The worker stamps expire_at from it (RETENTION_DAYS, read from the output by
+# make deploy-services); nothing else on the lane deletes a chunk.
+variable "retention_days" {
+  type    = number
+  default = 30
+  validation {
+    condition     = var.retention_days >= 1 && var.retention_days <= 3650
+    error_message = "retention_days must be between 1 and 3650."
+  }
+}
+
+output "embedding_model" {
+  description = "EMBEDDING_MODEL for the ingest worker and rag-api"
+  value       = var.embedding_model
+}
+
+output "embedding_version" {
+  description = "EMBEDDING_VERSION for the ingest worker and rag-api"
+  value       = var.embedding_version
+}
+
+output "retention_days" {
+  description = "RETENTION_DAYS for the ingest worker: expire_at = superseded_at + this"
+  value       = var.retention_days
+}

@@ -13,6 +13,9 @@
 # RESIDENCY picks the processor the way docai.tf did (us: Layout Parser; india: OCR in Mumbai).
 # VECTOR_INDEX_NAME and BQ_CHUNK_TABLE are empty in the lean profile, which switches the
 # datapoint upsert and the BigQuery mirror off; the Firestore index is always written.
+# 12 September 2026 (deploy/INDEXING.md): RETENTION_DAYS stamps expire_at on every retired row - the TTL policy's
+# number, variables.tf's retention_days; EMBEDDING_MODEL / EMBEDDING_VERSION are the ONE declared embedding, stamped
+# on every chunk row - the API embeds its queries with the same pair. make deploy-services passes all three.
 gcloud run deploy documind-ingest \
   --image=${REGION:-us-central1}-docker.pkg.dev/$PROJECT/documind/ingest:$GIT_SHA \
   --region=${REGION:-us-central1} --platform=managed \
@@ -22,7 +25,7 @@ gcloud run deploy documind-ingest \
   --min-instances=0 --max-instances=30 \
   --execution-environment=gen2 \
   --service-account=documind-ingest-sa@$PROJECT.iam.gserviceaccount.com \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RESIDENCY=${RESIDENCY:-us}|DOCAI_PROCESSOR_ID=$DOCAI_PROCESSOR_ID|AUDIT_BUCKET=$PROJECT-audit|VECTOR_INDEX_NAME=$VECTOR_INDEX_NAME|BQ_CHUNK_TABLE=$BQ_CHUNK_TABLE"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RESIDENCY=${RESIDENCY:-us}|DOCAI_PROCESSOR_ID=$DOCAI_PROCESSOR_ID|AUDIT_BUCKET=$PROJECT-audit|VECTOR_INDEX_NAME=$VECTOR_INDEX_NAME|BQ_CHUNK_TABLE=$BQ_CHUNK_TABLE|RETENTION_DAYS=${RETENTION_DAYS-30}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}"
 
 # Pub/Sub calls the worker AS the ingest service account; the account has to be allowed in.
 # The subscription already exists, pointing at this service's deterministic URL.

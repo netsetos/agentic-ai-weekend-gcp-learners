@@ -149,7 +149,37 @@ def version():
             "generator_model": settings.generator_model,
             "prompt": f"{settings.prompt_id}@{settings.prompt_version}",
             "retrieval_mode": settings.retrieval_mode,
+            # 12 September 2026: the embedding the query vector comes from - the same pair the worker stamps on
+            # every row - and whether the ledger's pre-filter is on. A reindex that "changed nothing" and a
+            # retrieval that "got worse" both start here.
+            "embedding": f"{settings.embed_model}@{settings.embedding_version}",
+            "retrieval_current_only": settings.retrieval_current_only,
             "git_sha": os.environ.get("GIT_SHA", "unknown")}
+
+@app.get("/v1/sources")
+def sources(tenant_id: str, user=Depends(verify_iap)):
+    """The versions view (12 September 2026): the tenant's ledger - every source's current version, its object
+    generation, what the last reindex cost (chunks reused by hash, embedded, retired), the date it declares, when
+    it landed - and the corpus fingerprint the cache is keyed to. Read-only, and only for a tenant the caller is
+    on the roster of: one customer's ledger is not another's to read. The UI's Documents page renders it;
+    `make sources TENANT=` prints the same rows from the shell (reconcile.py --report)."""
+    enforce_membership(user["email"], tenant_id)
+    fs = _fs()
+    rows = []
+    for s in fs.collection("sources").where("tenant_id", "==", tenant_id).stream():
+        d = s.to_dict() or {}
+        at = d.get("indexed_at")
+        rows.append({"name": d.get("name"), "status": d.get("status"), "doc_key": d.get("doc_key"),
+                     "generation": d.get("generation"), "chunks": d.get("chunks"),
+                     "reused": d.get("reused"), "embedded": d.get("embedded"), "retired": d.get("retired"),
+                     "effective_from": d.get("effective_from"),
+                     "embedding": f"{d.get('embedding_model') or '?'}@{d.get('embedding_version') or '?'}",
+                     "indexed_at": at.isoformat() if hasattr(at, "isoformat") else None})
+    rows.sort(key=lambda r: r["name"] or "")
+    led = fs.collection("ledger").document(tenant_id).get()
+    l = (led.to_dict() or {}) if led.exists else {}
+    return {"tenant_id": tenant_id, "fingerprint": l.get("fingerprint"), "versions": l.get("versions"),
+            "last_event": l.get("last_event"), "sources": rows}
 
 @app.get("/ready")
 def ready():
