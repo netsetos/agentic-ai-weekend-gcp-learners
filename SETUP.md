@@ -71,8 +71,8 @@ gcloud config set compute/region us-central1
 gcloud config set run/region us-central1
 ```
 
-Set a budget alert before you run anything (lesson 1.1, step 3). The kit's `make preflight` in
-[netsetos/agentic-ai-weekend-gcp](https://github.com/netsetos/agentic-ai-weekend-gcp) checks all of this read-only.
+Set a budget alert before you run anything (lesson 1.1, step 3). The kit's `make preflight` (from `deploy/` in this
+repo) checks all of this read-only.
 
 ## Colab
 
@@ -83,8 +83,8 @@ from google.colab import auth
 auth.authenticate_user()
 ```
 
-Change `PROJECT_ID = "documind-ai-YOUR-ID"` to your project id and run the rest in order. Notebooks from 2.3 on clone the
-kit (`/content/agentic-ai-weekend-gcp`, branch `feat/lesson-4.8-live-evals`) the first time they need it.
+Change `PROJECT_ID = "documind-ai-YOUR-ID"` to your project id and run the rest in order. Notebooks from 2.3 on clone this
+repo (`/content/agentic-ai-weekend-gcp-learners`) the first time they need the kit under `deploy/`.
 
 ## Local Jupyter
 
@@ -99,11 +99,8 @@ jupyter lab
 ```
 
 Locally the `auth.authenticate_user()` cell is a no-op outside Colab; ADC from `gcloud auth application-default login`
-is what the clients use. Clone the kit beside this repo if you want the notebooks to find it without cloning:
-
-```bash
-git clone --depth 1 -b feat/lesson-4.8-live-evals https://github.com/netsetos/agentic-ai-weekend-gcp
-```
+is what the clients use. The kit is already beside you: the notebooks look for `deploy/evals` above their own folder
+before they clone anything, and this repo has it.
 
 ## What costs money
 

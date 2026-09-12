@@ -1,0 +1,217 @@
+[
+ {
+  "slug": "code_on_wages_2019",
+  "title": "The Code on Wages, 2019 (No. 29 of 2019)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme",
+   "zeta"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/06/c328da14bbb15fc4ad571dc33e7a4ab3.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "0d17b967a528da2d6b827655ba9a701dc15d78b4d4f58b9bbc21d6789a680c85",
+  "bytes": 237003,
+  "pages": 29,
+  "text_layer": true,
+  "note": "Consolidates the Payment of Wages Act 1936, the Minimum Wages Act 1948, the Payment of Bonus Act 1965 and the Equal Remuneration Act 1976."
+ },
+ {
+  "slug": "payment_of_bonus_act_1965",
+  "title": "The Payment of Bonus Act, 1965 (No. 21 of 1965)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/06/71f40bdd15ede77446bb56d7b1c16df7.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "03853c7053cfe0d0e44b5d3d10ed9c1e7526c9313f2b9c9f9ba9a48628f946b3",
+  "bytes": 658135,
+  "pages": 31,
+  "text_layer": true,
+  "note": "Minimum bonus 8.33 per cent, maximum twenty per cent, thirty working days to qualify."
+ },
+ {
+  "slug": "payment_of_gratuity_act_1972",
+  "title": "The Payment of Gratuity Act, 1972 (No. 39 of 1972)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/06/072a4b7ea8246533c62b96b68a30da53.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "fa044c91c6714c738ded7ba98dbe9950060d9bf85ec2a63996cee927269669d4",
+  "bytes": 171925,
+  "pages": 10,
+  "text_layer": true,
+  "note": "Gratuity after five years of continuous service, at fifteen days' wages per completed year."
+ },
+ {
+  "slug": "maternity_benefit_act_1961",
+  "title": "The Maternity Benefit Act, 1961 (No. 53 of 1961) - principal Act",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/06/811d51e052c2e98592fcd55ca6f3ca52.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "e5d6b9b91f922cb377da08593793306301f3818ba0ad7adef6c3a31708a55ac8",
+  "bytes": 141324,
+  "pages": 11,
+  "text_layer": true,
+  "note": "The principal Act as published by the ministry: twelve weeks. The 2017 amendment below substitutes twenty-six."
+ },
+ {
+  "slug": "maternity_benefit_amendment_act_2017",
+  "title": "The Maternity Benefit (Amendment) Act, 2017 (No. 6 of 2017) - Gazette of India",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/06/1a64517bcba2fab5650a9ff66d429080.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "c19293bbe943e0fcc1e98e94c2f6ed41eb5eeed7bf4a1973e83d5ccc025c348a",
+  "bytes": 183816,
+  "pages": 4,
+  "text_layer": true,
+  "note": "Substitutes twenty-six weeks, adds the creche duty at fifty or more employees and work from home."
+ },
+ {
+  "slug": "posh_act_2013",
+  "title": "The Sexual Harassment of Women at Workplace (Prevention, Prohibition and Redressal) Act, 2013 (No. 14 of 2013) - Gazette scan",
+  "publisher": "Gujarat Informatics Ltd, Government of Gujarat (Gazette of India reprint)",
+  "tenants": [
+   "acme"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://gil.gujarat.gov.in/Media/DocumentUpload/posh_act._english.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "70d525e419baf7a9d249d9c679a23714603509d018d38f932be3a18365d3b195",
+  "bytes": 750262,
+  "pages": 13,
+  "text_layer": false,
+  "note": "A SCANNED Gazette: JBIG2 images, no text layer. pypdf returns noise; this is the document only the Document AI OCR lane can read (lesson 4.1)."
+ },
+ {
+  "slug": "code_on_social_security_2020",
+  "title": "The Code on Social Security, 2020 (No. 36 of 2020)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme",
+   "zeta"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/07/b0620548445580767b5c0d18c95c26f7.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "975235e57b8b8c3f4a09f6c9f0dbb2bfc663c15faf3715108ea33113ef565be7",
+  "bytes": 616749,
+  "pages": 116,
+  "text_layer": true,
+  "note": "Consolidates nine social-security laws, the Payment of Gratuity Act 1972 and the Maternity Benefit Act 1961 among them: gratuity for a fixed term employee on pro rata basis (s. 53), gig and platform workers defined."
+ },
+ {
+  "slug": "industrial_relations_code_2020",
+  "title": "The Industrial Relations Code, 2020 (No. 35 of 2020)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme",
+   "zeta"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/07/682a44b5426bff2c1f4943ee1b2fd566.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "43cadbd9ed08dd00dfba43571253eaf63d655f9fc411df5b9a1059de8d40ce09",
+  "bytes": 454780,
+  "pages": 56,
+  "text_layer": true,
+  "note": "Trade unions, standing orders (three hundred or more workers), grievance redressal, fixed term employment, strikes and lay-offs."
+ },
+ {
+  "slug": "osh_code_2020",
+  "title": "The Occupational Safety, Health and Working Conditions Code, 2020 (No. 37 of 2020)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme",
+   "zeta"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.labour.gov.in/static/uploads/2025/07/36fcfa5d8e6b9145e282bf7b950d6c47.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "9ce8f68b88f725fbce4fadfb45d9ddc3ed7a5f59d92a2ebd3d5bd7ebb1c83891",
+  "bytes": 531293,
+  "pages": 86,
+  "text_layer": true,
+  "note": "Working hours, overtime at twice the rate of wages (s. 27), one day of leave for every twenty days worked (s. 32), safety duties and welfare."
+ },
+ {
+  "slug": "labour_codes_compliance_handbook",
+  "title": "Compliance Handbook for Employers Under the Four Labour Codes (Central Government Sphere)",
+  "publisher": "Ministry of Labour & Employment, Government of India",
+  "tenants": [
+   "acme",
+   "zeta"
+  ],
+  "doc_type": "guidance",
+  "source_url": "https://www.labour.gov.in/static/uploads/2026/02/83978455025732b99b0165def80ab171.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "bbc851624beb6011c550fa6b8c6b6f29f0c5add6be6b8f5be5e9bc2f3b0288ec",
+  "bytes": 701666,
+  "pages": 38,
+  "text_layer": true,
+  "note": "The ministry's own employer guide to the four Codes - registrations, returns, gratuity for fixed term employees after one year - the kind of document an HR team keeps beside the Acts."
+ },
+ {
+  "slug": "dpdp_act_2023",
+  "title": "The Digital Personal Data Protection Act, 2023 (No. 22 of 2023)",
+  "publisher": "Ministry of Electronics and Information Technology, Government of India",
+  "tenants": [
+   "acme",
+   "globex"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.meity.gov.in/static/uploads/2024/06/2bf1f0e9f04e6fb4f8fef35e82c42aa5.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "4deb23981d3010c8225a2ff6149e7243dc2268455b299e283afebdd7b72a7d15",
+  "bytes": 182082,
+  "pages": 21,
+  "text_layer": true,
+  "note": "Data Fiduciary, Data Principal, Consent Manager, the Data Protection Board of India - what an AI-tool policy and a vendor contract must comply with."
+ },
+ {
+  "slug": "it_act_2000",
+  "title": "The Information Technology Act, 2000 (No. 21 of 2000) - as enacted",
+  "publisher": "Ministry of Electronics and Information Technology, Government of India",
+  "tenants": [
+   "acme",
+   "globex"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://www.meity.gov.in/static/uploads/2024/03/ITbill_2000.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "48399d923db97e5f74b73e532e8f9f4d31c986a96beb3b886100646b46d23ea4",
+  "bytes": 249447,
+  "pages": 34,
+  "text_layer": true,
+  "note": "The 2000 text as MeitY publishes it (before the 2008 amendment): digital signatures, electronic records, intermediaries, the Cyber Appellate Tribunal."
+ },
+ {
+  "slug": "cgst_act_2017",
+  "title": "The Central Goods and Services Tax Act, 2017 (No. 12 of 2017) - as on 1 August 2021",
+  "publisher": "Central Board of Indirect Taxes and Customs, Government of India",
+  "tenants": [
+   "acme"
+  ],
+  "doc_type": "statute",
+  "source_url": "https://cbic-gst.gov.in/pdf/CGST-Act-Updated-01082021.pdf",
+  "retrieved": "2026-09-05",
+  "sha256": "f7317f3ae40c2f41ab777acbd49fca309f10d8686640dea1bf215cf4c48754e7",
+  "bytes": 1888392,
+  "pages": 236,
+  "text_layer": true,
+  "note": "236 pages: the law behind every invoice in the corpus - tax invoice, time of supply, input tax credit, the twenty per cent ceiling on the rate of central tax."
+ }
+]

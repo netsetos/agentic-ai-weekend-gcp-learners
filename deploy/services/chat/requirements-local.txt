@@ -1,0 +1,12 @@
+# The Rs 0 lane: DOCUMIND_PROFILE=local (lesson 6.4 step 7, shared/profile.py).
+# Installed ON TOP of requirements.txt, never instead of it, and never in the image:
+#     pip install -r requirements.txt -r requirements-local.txt
+# The pins are 6.4's. Ollama itself is a separate install (https://ollama.com), then
+#     ollama pull gemma3:4b
+langchain-chroma==1.1.0
+chromadb==1.5.9
+langchain-ollama==1.1.0
+# 8.5's laptop lane for the checkpointer: a file that survives a restart of the process.
+langgraph-checkpoint-sqlite==3.1.1
+# The ADK brain talks to Ollama through LiteLlm (google.adk.models.lite_llm) on the local lane.
+litellm==1.99.0

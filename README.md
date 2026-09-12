@@ -11,18 +11,20 @@ Companion code repo for the **Netsetos GenAI on GCP Capstone** course (v2.0) at 
 | `module-NN-slug/lesson-N.M-slug/notebooks/` | the lesson's runnable Colab notebook, with an Open in Colab badge at the top |
 | `module-NN-slug/lesson-N.M-slug/practice/` | the practice-lab notebook, where the lesson has one (43 of 68) |
 | `module-NN-slug/lesson-N.M-slug/interview/` | a placeholder; the interview Q&A lives on netsetos.com |
+| `deploy/` | the kit: the services, the shared layer, the corpus and the golden set under `evals/`, Terraform, the smokes, the Makefile - what Module 12 ships |
+| `.github/workflows/` | the kit's dry run on every push and the keyless release workflow (12.7) |
 | `requirements.txt` | the pins for running the notebooks locally |
 | `.env.example` | the two variables you set locally |
 
 > Lesson pages, practice-lab walkthroughs and interview Q&A live on [netsetos.com](https://netsetos.com). This repo is code only:
 > open a notebook, run it, change it.
 
-## One project: the kit
+## One project: the kit, in this repo
 
 Every notebook builds the same product, and from lesson 2.3 on it reads the product's code from one place: the kit under
-`deploy/` in [netsetos/agentic-ai-weekend-gcp](https://github.com/netsetos/agentic-ai-weekend-gcp), branch `feat/lesson-4.8-live-evals`.
-The notebooks clone it for you (`/content/agentic-ai-weekend-gcp` on Colab) and take the corpus, the answer contract and
-the services from that tree; Module 12 ships it. Lesson 1.1 shows the layout. There is no second project to keep in step.
+`deploy/` in this repo. The notebooks clone this repo for you (`/content/agentic-ai-weekend-gcp-learners` on Colab) and take the
+corpus, the answer contract and the services from that tree; Module 12 ships it and lesson 1.1 shows the layout. There is
+no second project to keep in step: the course's private repo holds this same tree beside the lesson pages.
 
 ## Getting started
 

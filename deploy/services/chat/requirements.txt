@@ -1,0 +1,29 @@
+# DocuMind chat service - the LangChain tool loop from lesson 6.4.
+# The web layer. agent.py imports FastAPI and the Dockerfile's CMD is gunicorn with a
+# uvicorn worker, and none of the three was declared: pip install succeeded, the image
+# built, and the container exited on the first import.
+fastapi==0.141.1
+uvicorn==0.52.4
+gunicorn==26.2.0
+pydantic==2.13.5
+langchain==1.4.0
+langchain-core==1.6.2
+langchain-google-genai==4.4.0
+google-genai==2.22.0
+requests==2.34.2
+# needed by shared/documind_tools.py, which mints a per-call Cloud Run ID token (lesson 7.3).
+google-auth==2.57.1
+# needed by shared/tenancy.py, which opens the roster lazily - the first live smoke of this service
+# (2026-09-09) answered 500 to every /v1/chat, the outsider included, because the import happened
+# inside tenant_for() and no image had ever run it. validate.py's shared-deps rule now catches this.
+google-cloud-firestore==2.30.0
+# The checkpointer (lesson 8.5, gap G5): conversations live in Cloud SQL, not in the process.
+# psycopg[binary] is NOT optional - without the binary wheel the import fails with a message
+# that never mentions Postgres (8.5 reproduced it). [pool] is the long-lived ConnectionPool the
+# lifespan opens once; requests borrow from it, and nothing returns from inside a `with`.
+langgraph-checkpoint-postgres==3.1.2
+psycopg[binary,pool]==3.3.5
+psycopg-pool==3.3.1
+# The third brain (lesson 8.7, gap G6). brains.py imports it lazily: leave it out and the
+# `adk` brain is a 501, not a crash at startup.
+google-adk==2.8.0

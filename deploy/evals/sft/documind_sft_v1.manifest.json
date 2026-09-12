@@ -1,0 +1,55 @@
+{
+ "version": "v1",
+ "built_at": "2026-09-10",
+ "tenant": "acme",
+ "rows": 317,
+ "refusals": 30,
+ "documents": [
+  "cgst_act_2017.pdf",
+  "code_on_social_security_2020.pdf",
+  "code_on_wages_2019.pdf",
+  "dpdp_act_2023.pdf",
+  "hr_policy_2026.md",
+  "industrial_relations_code_2020.pdf",
+  "it_act_2000.pdf",
+  "labour_codes_compliance_handbook.pdf",
+  "maternity_benefit_act_1961.pdf",
+  "osh_code_2020.pdf",
+  "payment_of_bonus_act_1965.pdf",
+  "payment_of_gratuity_act_1972.pdf"
+ ],
+ "dropped_golden_overlap": 13,
+ "dropped_golden_by_rule": {
+  "evidence": 9,
+  "question": 4
+ },
+ "dropped_golden_ids": [
+  "jn-10",
+  "jn-11",
+  "lk-03",
+  "lk-14",
+  "lk-17",
+  "lk-18",
+  "lk-20",
+  "lk-26"
+ ],
+ "dropped_pii": 0,
+ "generator": "gemini-3.6-flash",
+ "source": "evals/corpus mirrors via shared/documind_corpus.py - never traffic, never the answer cache",
+ "corpus_manifest_sha256": "75b21a03f12f7c02",
+ "files": {
+  "vertex": {
+   "path": "evals/sft/documind_sft_v1.vertex.jsonl",
+   "sha256": "5a778b8784defe39aa330c357aeef70e5f0c2fe09ec4b4a4d695a7e718500b98"
+  },
+  "chat": {
+   "path": "evals/sft/documind_sft_v1.chat.jsonl",
+   "sha256": "f8dfcd2275db373c28a61d2829bcb73e015c6d9965b2206e03957f7a4461fe00"
+  }
+ },
+ "base_model_default": {
+  "managed": "gemini-3.1-flash-lite",
+  "slm": "unsloth/gemma-4-E2B-it"
+ },
+ "rule": "frozen: a changed corpus is a new version, never an edit of this file"
+}

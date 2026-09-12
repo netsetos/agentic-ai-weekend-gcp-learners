@@ -1,0 +1,25 @@
+# cloudbuild.yaml - build and push the gemma-vllm image (11.1, 11.2). make build-vllm runs it.
+# HF_TOKEN comes from Secret Manager - the `hf-token` secret secrets.tf creates (the same one 10.5 pushes with);
+# it is never baked into the repo. The image goes to the lane's own Artifact Registry repository (registry.tf)
+# under the name the deploy and the GKE manifest read: _IMAGE, passed by the Makefile.
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  entrypoint: 'bash'
+  secretEnv: ['HF_TOKEN_SECRET']
+  args:
+  - '-c'
+  - |
+      docker build \
+        --build-arg HF_TOKEN=$$HF_TOKEN_SECRET \
+        -t ${_IMAGE} .
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', '${_IMAGE}']
+images: ['${_IMAGE}']
+substitutions:
+  _IMAGE: 'us-central1-docker.pkg.dev/${PROJECT_ID}/documind/gemma-vllm:latest'
+options:
+  machineType: E2_HIGHCPU_32
+availableSecrets:
+  secretManager:
+  - versionName: projects/${PROJECT_ID}/secrets/hf-token/versions/latest
+    env: 'HF_TOKEN_SECRET'

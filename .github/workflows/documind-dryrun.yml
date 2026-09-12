@@ -1,0 +1,57 @@
+name: DocuMind dry run (Tier A)
+
+# Offline validation of the DocuMind AI deploy stack. No GCP credentials, no
+# cost: it extracts the deployable tree from the Module 12 notebooks and runs
+# terraform validate, python syntax + import checks, requirements + Dockerfile
+# checks, and builds the service images. This is the "will the live demo hold
+# together" gate — it must be green before a live session.
+#
+# The live rehearsal (terraform apply + real deploy + smoke) is deliberately
+# NOT here: it costs money and needs a real project. Run it by hand with the
+# Makefile (make plan / up / smoke / down). See deploy/README.md.
+
+on:
+  push:
+    paths:
+      - "deploy/**"
+      - "Module 12/**/*.ipynb"
+      - ".github/workflows/documind-dryrun.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "Module 12/**/*.ipynb"
+      - ".github/workflows/documind-dryrun.yml"
+  workflow_dispatch:
+
+jobs:
+  tier-a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+          terraform_wrapper: false
+
+      - name: tflint (optional lint)
+        uses: terraform-linters/setup-tflint@v4
+        continue-on-error: true
+
+      - name: Extraction is in sync with the notebooks
+        run: python deploy/extract_documind.py --check
+
+      - name: Tier-A offline validation (terraform validate + docker build run here)
+        run: python deploy/validate.py
+
+      # The eval gate, offline half (12.7). It judges the GOLDEN SET, not the model:
+      # that every assertion could still fail, that every must_retrieve anchor
+      # resolves, and that the isolation rows are still there. No credentials, so it
+      # belongs on the PR. The live half needs a deployment and runs from
+      # documind-cd.yml, keylessly.
+      - name: Eval gate (offline)
+        run: python deploy/evals/run_eval.py

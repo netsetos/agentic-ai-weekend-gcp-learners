@@ -1,0 +1,33 @@
+# Reference commands extracted from 12.5 (GCP_Capstone_12.5_Ingestion.ipynb).
+# NOT run automatically. Review, set $PROJECT / $GIT_SHA, then run by hand
+# or via the Makefile live-tier targets. See deploy/README.md.
+
+# ---- DEPLOY ----
+# The ingest worker. Reached by nothing but the push subscription in eventarc.tf, which
+# delivers as documind-ingest-sa with an OIDC token - hence internal ingress, no
+# unauthenticated calls, and the invoker grant to that account below. Concurrency 1 (see the
+# Dockerfile), and a 600-second request ceiling to match the subscription's ack deadline:
+# a hundred-page Act is a dozen Document AI calls and fits. Thirty instances, so a corpus
+# upload of thirty objects is not a queue of cold-start refusals.
+#
+# RESIDENCY picks the processor the way docai.tf did (us: Layout Parser; india: OCR in Mumbai).
+# VECTOR_INDEX_NAME and BQ_CHUNK_TABLE are empty in the lean profile, which switches the
+# datapoint upsert and the BigQuery mirror off; the Firestore index is always written.
+gcloud run deploy documind-ingest \
+  --image=${REGION:-us-central1}-docker.pkg.dev/$PROJECT/documind/ingest:$GIT_SHA \
+  --region=${REGION:-us-central1} --platform=managed \
+  --no-allow-unauthenticated \
+  --ingress=internal \
+  --memory=2Gi --cpu=2 --concurrency=1 --timeout=600 \
+  --min-instances=0 --max-instances=30 \
+  --execution-environment=gen2 \
+  --service-account=documind-ingest-sa@$PROJECT.iam.gserviceaccount.com \
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RESIDENCY=${RESIDENCY:-us}|DOCAI_PROCESSOR_ID=$DOCAI_PROCESSOR_ID|AUDIT_BUCKET=$PROJECT-audit|VECTOR_INDEX_NAME=$VECTOR_INDEX_NAME|BQ_CHUNK_TABLE=$BQ_CHUNK_TABLE"
+
+# Pub/Sub calls the worker AS the ingest service account; the account has to be allowed in.
+# The subscription already exists, pointing at this service's deterministic URL.
+gcloud run services add-iam-policy-binding documind-ingest \
+  --region=${REGION:-us-central1} --project=$PROJECT \
+  --member="serviceAccount:documind-ingest-sa@$PROJECT.iam.gserviceaccount.com" \
+  --role=roles/run.invoker
+

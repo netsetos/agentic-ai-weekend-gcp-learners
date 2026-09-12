@@ -1,0 +1,87 @@
+# vLLM on GKE Autopilot. Owned by lesson 11.5.
+#
+# Fixed 2026-09-05, after a check found the manifest could not start:
+#   * it ran the STOCK upstream vllm/vllm-openai image, asked for
+#     google/gemma-3-4b-it, and set HF_HUB_OFFLINE=1 - which blocks the only
+#     route to those weights. It now runs the image 11.1 BUILDS, which has the
+#     weights baked, so HF_HUB_OFFLINE=1 is finally the correct setting.
+#   * it requested cpu 8 / memory 32Gi, which is EXACTLY g2-standard-8's whole
+#     capacity. Nothing is left for kubelet and system DaemonSets, so Autopilot
+#     rounds up to g2-standard-12 and you silently pay for a bigger node.
+#   * the header claimed "behind the GKE Inference Gateway". No Gateway,
+#     InferencePool or HTTPRoute exists anywhere in this repo. Claim removed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: documind-vllm
+  labels: { app: documind-vllm }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: documind-vllm }
+  template:
+    metadata:
+      labels: { app: documind-vllm }
+    spec:
+      # Autopilot reads this and provisions the node. Ask for a class it cannot
+      # get in this region and the pod stays Pending with no error - the failure
+      # mode to demo, because it looks like a slow cluster.
+      #
+      # L4 (machine family G2) IS available in asia-south1-a/-b/-c, which is the
+      # whole reason this file exists: Cloud Run's L4 in Mumbai is
+      # invitation-only, and GKE's is not.
+      nodeSelector:
+        cloud.google.com/gke-accelerator: nvidia-l4
+      containers:
+        - name: vllm
+          # The image lesson 11.1 BUILDS, not the upstream base. It is
+          # `FROM vllm/vllm-openai:v0.28.0` with the gemma-3-4b-it weights
+          # downloaded at build time - which is what makes HF_HUB_OFFLINE
+          # below correct instead of fatal.
+          # The image make build-vllm pushed to the lane's own repository; make gke-up fills IMAGE in (envsubst).
+          # Until Module 11 this line named a placeholder project, so kubectl pulled a tag that could not exist.
+          image: ${IMAGE}
+          args:
+            - --model=google/gemma-3-4b-it
+            - --dtype=bfloat16
+            - --gpu-memory-utilization=0.90
+            - --max-model-len=4096
+            - --port=8080
+          ports:
+            - containerPort: 8080
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+              # 6 / 24Gi, NOT 8 / 32Gi. g2-standard-8 has exactly 8 vCPU and
+              # 32 GiB, and a pod that asks for all of it leaves nothing for
+              # the kubelet - so Autopilot provisions g2-standard-12 instead
+              # and the bill goes up by ~$0.16/hr for capacity you never use.
+              cpu: "6"
+              memory: 24Gi
+          env:
+            # Correct now that the image carries the weights. On the stock
+            # image this same line was the bug.
+            - name: HF_HUB_OFFLINE
+              value: "1"
+          # Weights load before the server answers. Without a startup probe
+          # Kubernetes restarts the pod mid-load, for ever.
+          startupProbe:
+            httpGet: { path: /health, port: 8080 }
+            failureThreshold: 60
+            periodSeconds: 10
+          readinessProbe:
+            httpGet: { path: /health, port: 8080 }
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: documind-vllm
+spec:
+  # ClusterIP on purpose. A LoadBalancer here would add a public IP and an
+  # hourly charge to a service that only 11.5's benchmark talks to; the README
+  # reaches it with `kubectl port-forward`, which costs nothing.
+  selector: { app: documind-vllm }
+  ports:
+    - port: 80
+      targetPort: 8080

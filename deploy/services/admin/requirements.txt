@@ -1,0 +1,8 @@
+streamlit==1.63.0
+pandas==2.3.3
+plotly==5.24.1
+google-cloud-bigquery[pandas]==3.45.0
+google-cloud-firestore==2.30.0
+google-cloud-storage==3.13.1
+google-cloud-dlp==3.39.0
+google-auth==2.57.1

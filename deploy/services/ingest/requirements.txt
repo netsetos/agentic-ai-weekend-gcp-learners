@@ -1,0 +1,15 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+gunicorn==26.2.0
+pydantic==2.13.5
+google-cloud-firestore==2.30.0
+google-cloud-storage==3.13.1
+google-cloud-documentai==3.15.0
+pypdf==6.17.0
+google-cloud-aiplatform==1.153.1
+google-genai==2.22.0
+google-cloud-dlp==3.39.0
+# 9.6: shared/pii.py re-encodes a page render under DLP's 0.5 MiB inspect limit before scanning its pixels.
+Pillow==12.3.0
+# The SQL lane (lesson 5.5, gap G9): one chunk_source row per indexed chunk, when BQ_CHUNK_TABLE is set.
+google-cloud-bigquery==3.45.0

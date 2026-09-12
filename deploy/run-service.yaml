@@ -1,0 +1,55 @@
+# The Cloud Run service manifest Cloud Deploy renders. Lesson 12.7.
+#
+# WHY THIS FILE EXISTS. `gcloud deploy releases create` needs a skaffold configuration: that is
+# how Cloud Deploy knows what to render for each target. This kit has no skaffold.yaml and does
+# not want one - a Cloud Run pipeline does not need the rest of skaffold - so the release is cut
+# with `--from-run-manifest=run-service.yaml`, which makes gcloud generate the skaffold config
+# for you from this single file.
+#
+# Without it the pipeline fails at the FIRST credentialed step, before any rollout exists, with
+# a message about a missing skaffold configuration. That is not a subtle failure, but it is one
+# you only meet on the day you first run the pipeline for real.
+#
+# NOTE THE MISSING TRAFFIC STANZA. There is deliberately no `traffic:` block here. Cloud Deploy
+# owns traffic during a canary - it sets 10%, waits, then the rest - and a traffic stanza in the
+# manifest fights it: every rollout would slam 100% to the new revision and the canary would be
+# decorative. The absence is the feature.
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: documind-api
+  annotations:
+    run.googleapis.com/ingress: all
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"     # 11.4's lesson: never leave this at 1
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      serviceAccountName: documind-api-sa
+      containerConcurrency: 8
+      timeoutSeconds: 300
+      containers:
+        # The image is a PLACEHOLDER name, not a tag. `gcloud deploy releases create --images`
+        # binds it: --images="rag-api=REGION-docker.pkg.dev/PROJECT/documind/rag-api:SHA".
+        # The literal string here must match the key on the left of that = sign.
+        - image: rag-api
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AUTH_MODE
+              value: iap
+            # The two legs of shared/iap.identity() (12.8, gap G4). SELF_URL is this service's
+            # own URL - the audience an agent, run_eval.py or smoke.py mints an ID token for
+            # (7.3); Cloud Run's URLs are deterministic, so it is known before the first deploy.
+            # IAP_AUDIENCE is every SURFACE whose forwarded assertion this service accepts,
+            # and no other: the UI and the chat service, by project NUMBER, not id.
+            - name: SELF_URL
+              value: https://documind-api-PROJECT_NUMBER.us-central1.run.app
+            - name: IAP_AUDIENCE
+              value: /projects/PROJECT_NUMBER/locations/us-central1/services/documind-ui,/projects/PROJECT_NUMBER/locations/us-central1/services/documind-chat
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi

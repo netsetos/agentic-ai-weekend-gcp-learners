@@ -1,0 +1,94 @@
+# services/litellm/config.lean.yaml - the gateway on the LEAN profile. Module 11 (11.3 rebuilt on the lane, 10 Sept 2026).
+#
+# What is different from config.yaml (the full profile): no database (LiteLLM's virtual keys, tag budgets and spend logs
+# need Postgres; the lean lane has none, and the API prices the answer from the cost header instead), no Langfuse, no
+# master key - the gateway is a Cloud Run service behind IAM like every other on the lane, and the caller's ID token is
+# the door. The self-hosted routes point at the TOKEN PROXY inside this container (token_proxy.py, 127.0.0.1:8090), which
+# forwards to the Cloud Run backend with a Google ID token it mints per call: LiteLLM reads litellm_params.api_key once,
+# at startup, and an ID token lives an hour, so a pasted token expires at 3am on a path nobody is watching.
+#
+# Rates are STANDARD (from 1 Jan 2027; 3.6-flash bills an introductory 0.75/3.75 until then). The self-hosted figure is
+# a RATE, not a price: Rs 86,904 a month for the L4 instance over ~50M tokens - it only holds at that volume (11.4).
+
+model_list:
+  # ---- managed: Gemini on the GLOBAL endpoint - the default answer, and where every fallback ends ---------------
+  - model_name: documind-general
+    litellm_params:
+      model: vertex_ai/gemini-3.6-flash
+      vertex_project: os.environ/VERTEXAI_PROJECT
+      vertex_location: global
+      tags: ["general", "public"]
+      input_cost_per_token: 0.0000015
+      output_cost_per_token: 0.0000075
+
+  - model_name: documind-reasoning
+    litellm_params:
+      model: vertex_ai/gemini-3.1-pro-preview
+      vertex_project: os.environ/VERTEXAI_PROJECT
+      vertex_location: global
+      tags: ["complex", "reasoning"]
+      input_cost_per_token: 0.0000020
+      output_cost_per_token: 0.0000120
+
+  # ---- the fine-tune from 10.5, served by Ollama on a Cloud Run L4 (11.4), through the token proxy ---------------
+  - model_name: documind-slm
+    litellm_params:
+      model: ollama_chat/documind-slm
+      api_base: http://127.0.0.1:8090/slm
+      tags: ["residency-in", "tuned"]
+      timeout: 110                                  # a cold GPU is 30-60 s away; the API waits 90
+      input_cost_per_token: 0.0000205
+      output_cost_per_token: 0.0000205
+
+  # The pre-call hook's target for RESTRICTED text (a PAN, an Aadhaar): the self-hosted model, and NO fallback to
+  # Gemini - the point of the route is that the text does not leave. A cold GPU means a slow answer, not a leak.
+  - model_name: documind-sensitive
+    litellm_params:
+      model: ollama_chat/documind-slm
+      api_base: http://127.0.0.1:8090/slm
+      tags: ["sensitive", "dpdpa"]
+      timeout: 110
+      input_cost_per_token: 0.0000205
+      output_cost_per_token: 0.0000205
+
+  # ---- 11.1 / 11.2's route. On lean it is the SLM's own OpenAI-compatible door (Ollama serves /v1/chat/completions);
+  # with the vLLM engine built and deployed (make build-vllm deploy-vllm), config.yaml's hosted_vllm entry takes over.
+  - model_name: documind-inference
+    litellm_params:
+      model: openai/documind-slm
+      api_base: http://127.0.0.1:8090/slm/v1
+      api_key: unused
+      tags: ["self-hosted"]
+      timeout: 110
+      input_cost_per_token: 0.0000205
+      output_cost_per_token: 0.0000205
+
+router_settings:
+  routing_strategy: simple-shuffle
+  enable_tag_filtering: true
+  # Self-host cold, scaled to zero or out of quota -> Gemini answers. Only the sensitive route has nowhere to go.
+  fallbacks:
+    - documind-slm: ["documind-general"]
+    - documind-inference: ["documind-general"]
+    - documind-reasoning: ["documind-general"]
+  num_retries: 2
+  allowed_fails: 3
+  cooldown_time: 60
+  retry_policy:
+    RateLimitErrorRetries: 2
+    TimeoutErrorRetries: 1
+    InternalServerErrorRetries: 1
+    AuthenticationErrorRetries: 0
+
+# Presidio lives HERE and only here (11.3): the decision "may this text leave our perimeter" is made once, at the
+# gateway, where every route passes.
+guardrails:
+  - guardrail_name: "documind-pii-router"
+    litellm_params:
+      guardrail: custom
+      mode: "pre_call"
+      callback_class: documind_router.DocuMindRouter
+
+litellm_settings:
+  drop_params: true              # a backend that does not know a parameter (stream_options on Ollama) is not an error
+  set_verbose: false

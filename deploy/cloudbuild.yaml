@@ -1,0 +1,29 @@
+# Build the rag-api image from the deploy/ context. Lessons 12.2 and 12.7.
+#
+# WHY A CONFIG AND NOT `gcloud builds submit --tag`. --tag requires a Dockerfile at the ROOT of
+# the uploaded source. rag-api now imports deploy/shared/ (the answer contract, the IAP
+# verifier, the tenant roster), so its build context has to be deploy/ - and deploy/ has no
+# Dockerfile at its root, on purpose: eight services live under it. This file names the
+# Dockerfile explicitly and builds from `.` = deploy/.
+#
+#   gcloud builds submit --config=cloudbuild.yaml \
+#     --substitutions=_IMAGE=REGION-docker.pkg.dev/PROJECT/documind/rag-api:TAG .
+#
+# chat, ingest and admin build from the same context; any of them is this config with a
+# different Dockerfile (12.8's chat deploy passes _DOCKERFILE=services/chat/Dockerfile).
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - ${_DOCKERFILE}
+      - -t
+      - ${_IMAGE}
+      - .
+images:
+  - ${_IMAGE}
+substitutions:
+  _IMAGE: us-central1-docker.pkg.dev/documind-ai-YOUR-ID/documind/rag-api:dev
+  _DOCKERFILE: services/rag-api/Dockerfile
+options:
+  logging: CLOUD_LOGGING_ONLY

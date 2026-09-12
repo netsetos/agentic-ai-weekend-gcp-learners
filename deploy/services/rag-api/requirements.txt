@@ -1,0 +1,26 @@
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+gunicorn==26.2.0
+pydantic==2.13.5
+pydantic-settings==2.15.0
+google-cloud-aiplatform==1.153.1
+google-cloud-firestore==2.30.0
+google-genai==2.22.0
+google-cloud-discoveryengine==0.13.11
+google-cloud-bigquery==3.45.0
+# 9.4's Media Studio router (media.py, gap G8): generated assets and signed upload URLs.
+google-cloud-storage==3.13.1
+# 12.6: the guard, and gen_ai spans. util-genai is what actually reads
+# OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT, so pin it too -
+# the content-capture default lives there, not in the instrumentation.
+google-cloud-modelarmor==0.7.1
+opentelemetry-instrumentation-google-genai==1.1b1
+opentelemetry-util-genai==1.1b0
+google-cloud-logging==3.16.3
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-gcp-trace==1.15.0
+opentelemetry-instrumentation-fastapi==0.65b0
+tenacity==9.1.4
+httpx==0.28.1
+tiktoken==0.14.0

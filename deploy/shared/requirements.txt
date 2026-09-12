@@ -1,0 +1,4 @@
+# Shared agent tool layer (deploy/shared/documind_tools.py).
+# Imported by the chat and agent services; not a service itself.
+requests==2.34.2
+google-auth==2.57.1

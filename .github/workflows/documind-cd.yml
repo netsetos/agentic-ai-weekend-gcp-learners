@@ -1,0 +1,244 @@
+# DocuMind delivery. MANUAL ONLY (workflow_dispatch), deliberately: this repository is a
+# content repo with no GCP project behind it, and a deploy that fires on push is not
+# something to switch on as a side effect. In the application repo the trigger is
+#
+#   on:
+#     pull_request:          # the eval gate runs, and red blocks the merge
+#     push:
+#       branches: [main]     # merged and green -> build, release, staging, then a human
+#
+# and nothing else about this file changes. The gate is the jobs below, not the trigger.
+#
+# Keyless: no service-account JSON anywhere. GitHub mints a short-lived OIDC token
+# describing which repository, which workflow and which branch is running; Workload
+# Identity Federation exchanges it for a Google credential that expires in about an hour.
+# See deploy/terraform/wif.tf, which pins three claims:
+#
+#   repository_id  the IMMUTABLE numeric id. Names are re-registrable after a rename or
+#                  transfer, so a condition pinned to the NAME can be satisfied by
+#                  whoever claims that name next.
+#   repository     kept for readability in logs and in the principalSet.
+#   ref            refs/heads/main. Without it, anyone able to push a BRANCH could add a
+#                  workflow file and deploy to production.
+#
+# A workflow_dispatch run from any other branch therefore fails at the auth step. That is
+# the branch gate working, not a misconfiguration.
+name: documind-cd
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: Image tag to release (defaults to the commit SHA)
+        required: false
+        type: string
+      profile:
+        description: lean = the lane's release (a candidate revision, the live gate on it, a person, a traffic flip); full = Cloud Deploy
+        required: false
+        type: choice
+        options: [lean, full]
+        default: lean
+
+permissions:
+  contents: read
+  id-token: write          # REQUIRED for OIDC; without it auth fails with no token
+
+jobs:
+  # ---------------------------------------------------------------- gate 1: mechanical
+  # The offline half of the eval gate. It judges the GOLDEN SET, not the model: that every
+  # assertion could still fail, that every must_retrieve anchor resolves, and that the
+  # isolation rows have not been deleted to make a red build green. No credentials, so it
+  # also runs on every pull request from documind-dryrun.yml.
+  eval-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Eval gate (offline)
+        run: python deploy/evals/run_eval.py
+
+  # ---------------------------------------------------------------- the lane's release (lean)
+  # Module 10's seam as a pipeline, keyless. The same image tagged with the SHA; a candidate revision of documind-api
+  # that takes no traffic (make release-candidate); the live gate on it - 64 rows, five thresholds, as the roster
+  # member and as the outsider, whose tokens the deploy identity may mint (wif.tf); then a PERSON, through the
+  # production environment's required reviewers; then the traffic flip, which is also the rollback (make rollback).
+  # No Cloud Deploy verb on this path: the previous revision never went away, and GET /version says which is live.
+  release-lean:
+    if: ${{ inputs.profile == 'lean' }}
+    needs: eval-gate
+    runs-on: ubuntu-latest
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Resolve tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: echo "TAG=${IMAGE_TAG:-$GITHUB_SHA}" >> "$GITHUB_ENV"
+      - name: Build the API image
+        working-directory: deploy
+        run: make build PROJECT="$PROJECT" REGION="$REGION" SERVICES_lean=api GIT_SHA="$TAG"
+      - name: A candidate revision, no traffic
+        working-directory: deploy
+        run: make release-candidate PROJECT="$PROJECT" REGION="$REGION" GIT_SHA="$TAG"
+      - name: The live gate, on the candidate
+        working-directory: deploy
+        run: |
+          NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
+          make eval-live PROJECT="$PROJECT" REGION="$REGION" API="https://candidate---documind-api-$NUMBER.$REGION.run.app"
+
+  promote-lean:
+    needs: release-lean
+    runs-on: ubuntu-latest
+    environment: production      # the person: the environment's required reviewers approve, then traffic moves
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v3
+      - name: Traffic to the candidate (the release; the previous revision never went away)
+        working-directory: deploy
+        run: make promote PROJECT="$PROJECT" REGION="$REGION"
+
+  release:
+    if: ${{ inputs.profile == 'full' }}
+    needs: eval-gate          # red above means this job never starts
+    runs-on: ubuntu-latest
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT }}
+      REGION: ${{ vars.GCP_REGION }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # v3 (Node 24). The inputs are unchanged from v2 for the WIF+SA path.
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      # Through the ENVIRONMENT, not into the script text. `${{ }}` is substituted before
+      # bash parses the line, so an input containing a backtick or $( ) would execute.
+      - name: Resolve tag
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: echo "TAG=${IMAGE_TAG:-$GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      # `gcloud builds submit` has NO --file flag, and --tag requires a Dockerfile at the
+      # root of the source it uploads. rag-api imports shared/ (the answer contract, the IAP
+      # verifier), so its context is deploy/ - and deploy/ has no root Dockerfile, on purpose.
+      # cloudbuild.yaml names the Dockerfile explicitly; every service builds this way.
+      - name: Build
+        working-directory: deploy
+        run: |
+          gcloud builds submit --config=cloudbuild.yaml \
+            --substitutions=_IMAGE="$REGION-docker.pkg.dev/$PROJECT/documind/rag-api:$TAG" .
+
+      - name: Create a release
+        working-directory: deploy
+        run: |
+          gcloud deploy releases create "rel-$TAG" \
+            --delivery-pipeline=documind \
+            --region="$REGION" \
+            --from-run-manifest=run-service.yaml \
+            --images="rag-api=$REGION-docker.pkg.dev/$PROJECT/documind/rag-api:$TAG"
+
+      # Cloud Deploy's own verify step would be the textbook home for this. It runs a
+      # skaffold `verify` stanza, and --from-run-manifest generates a skaffold config that
+      # has no such stanza - so the wait and the check live here instead, in the open, where
+      # a learner can read them. clouddeploy.tf therefore sets verify = false: declaring a
+      # verify phase with nothing to run fails the canary at its verify step.
+      - name: Wait for the staging rollout
+        run: |
+          for i in $(seq 1 60); do
+            # `|| true` on purpose: the step runs under set -e, and one flaky API call
+            # should not abort a twenty-minute wait.
+            state=$(gcloud deploy rollouts list \
+              --delivery-pipeline=documind --release="rel-$TAG" \
+              --region="$REGION" --filter="targetId=documind-staging" \
+              --format="value(state)" --limit=1 2>/dev/null || true)
+            echo "rollout state: ${state:-PENDING}"
+            case "$state" in
+              SUCCEEDED) exit 0 ;;
+              FAILED|CANCELLED|HALTED) exit 1 ;;
+            esac
+            sleep 20
+          done
+          echo "staging rollout did not finish in 20 minutes" >&2
+          exit 1
+
+      # ------------------------------------------------------------ gate 2: mechanical
+      # The LIVE half, against staging.
+      #
+      # Be precise about the keyless argument, because the loose version is wrong: this is
+      # NOT the first step needing a credential - builds submit and releases create both
+      # authenticated, above, in this same job. What is true, and is the actual point, is
+      # that nothing before the MERGE needs one. documind-dryrun.yml runs the offline gate
+      # on every pull request with no Google credential at all, and the first thing that
+      # does need one is this post-merge job. A service-account JSON in a repository secret
+      # would have been the easy way to give it one.
+      #
+      # The threshold that matters here is isolation_403_rate: it asks as somebody who is
+      # NOT on the tenant roster and requires a 403. See run_eval.check_isolation() for
+      # why must_not_contain is reported but is not the gate.
+      # The token is minted HERE, not by the auth step. google-github-actions/auth only
+      # populates `steps.auth.outputs.id_token` when `token_format: id_token` is set, and that
+      # needs an audience - which for Cloud Run is the service URL, unknown until the describe
+      # below. Referencing the output without token_format yields an EMPTY string, and
+      # run_eval.py's `os.environ.get(...) or None` turns that into "send no Authorization
+      # header": the gate would call an unauthenticated endpoint and pass for the wrong reason.
+      - name: Eval gate (live, against staging)
+        run: |
+          URL=$(gcloud run services describe documind-api \
+            --region="$REGION" --format="value(status.url)")
+          DOCUMIND_ID_TOKEN=$(gcloud auth print-identity-token --audiences="$URL")
+          export DOCUMIND_ID_TOKEN
+          python deploy/evals/run_eval.py --api-url "$URL"
+
+      # Only now does prod come into view - and it stops for a person. require_approval
+      # is set on the prod target in clouddeploy.tf, so this promotion queues rather than
+      # deploying, then canaries at 10%.
+      - name: Promote to prod (queues for approval)
+        run: |
+          gcloud deploy releases promote \
+            --release="rel-$TAG" \
+            --delivery-pipeline=documind \
+            --region="$REGION" \
+            --to-target=documind-prod
+
+      # Rolling back is a traffic flip, not a build. `gcloud deploy targets rollback`
+      # promotes the previous release - note the `targets` group; there is no bare
+      # `gcloud deploy rollback`. The fastest path of all is
+      #   gcloud run services update-traffic documind-api --to-revisions=PREV=100
+      # because that revision never went away. Check which one is live with GET /version.
+      - name: Where it went
+        run: |
+          echo "Release rel-$TAG: staging deployed and verified."
+          echo "Prod is queued for approval, then canaries at 10%."
+          echo "Roll back with:"
+          echo "  gcloud deploy targets rollback documind-prod \\"
+          echo "    --delivery-pipeline=documind --region=$REGION"

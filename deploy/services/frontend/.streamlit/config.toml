@@ -1,0 +1,17 @@
+[server]
+headless = true
+address = "0.0.0.0"
+port = 8080
+# Both of these, or file uploads fail SILENTLY behind the load balancer:
+# the LB rewrites Origin, Streamlit's CSRF check rejects the multipart POST,
+# the spinner completes and no file arrives. Pairs with --session-affinity.
+enableXsrfProtection = false
+enableCORS = false
+maxUploadSize = 200
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#0d9488"

@@ -1,0 +1,8 @@
+# DocuMind A2A peer (lesson 8.4): ADK + the A2A server + the MCP client, and nothing from the kit.
+# [a2a] brings a2a-sdk[http-server] (the Starlette app to_a2a returns); [mcp] brings the mcp 1.x
+# protocol library McpToolset speaks. No fastmcp here - this is a client of 7.2's server, not a server.
+google-adk[a2a,mcp]==2.8.0
+a2a-sdk[http-server]==1.1.2
+google-genai==2.22.0
+google-auth==2.57.1
+uvicorn==0.52.4

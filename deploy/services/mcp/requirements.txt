@@ -1,0 +1,11 @@
+# DocuMind MCP server (lesson 7.1). The image builds from deploy/ so shared/ lands beside it.
+# fastmcp 3, not 4: lesson 7.3's ADK client needs the mcp 1.x protocol library (google-adk[mcp]
+# declares mcp<2), and fastmcp 4 pulls mcp>=2. Server and client pin the same side of that line.
+fastmcp==3.4.7
+uvicorn==0.52.4
+# needed by shared/: the per-call ID token (documind_tools), the bearer-token verifier (iap),
+# the roster and the ingest claims (tenancy, this server), the audit bucket (audit_log).
+requests==2.34.2
+google-auth==2.57.1
+google-cloud-firestore==2.30.0
+google-cloud-storage==3.13.1
