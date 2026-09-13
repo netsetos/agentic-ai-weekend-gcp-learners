@@ -214,7 +214,7 @@ Lesson ids ending in `p` are practice labs.
 | `terraform/off.tf` | code | - | 12.1,12.3,12.8 |
 | `terraform/reconcile.tf` | code | - | 12.5 |
 | `terraform/spanner.tf` | code | - | 4.6 |
-| `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.5,4.6,4.7 |
+| `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.2p,4.5,4.6,4.7 |
 
 ## E. unreferenced by any notebook (42)
 
