@@ -55,7 +55,12 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
 6. **Swap.** `swap_versions()` flips the new rows current (clearing the stage marks), then retires every other
    current row of the source: `current=false`, `superseded_by`, `superseded_at`, `expire_at = now + RETENTION_DAYS`,
    `effective_to` when the successor declares a date. On the full profile the ANN tier follows: the new datapoints
-   go up after the swap, the retired ids come out.
+   go up after the swap, the retired ids come out. Then the **managed mirror** (P9.2, 13 September 2026), when
+   `MANAGED_MIRROR` names a store: the version's text - the same text these rows hold - goes to the tenant's RAG
+   Engine corpus (4.3) and / or Vertex AI Search data store (4.4) as one document named by its `doc_key`, and the
+   versions the swap retired leave them; `mirror_ok` per store, `mirror_failed` on an error (the ingest is not
+   failed - the walk repairs the mirror), `mirror_no_store` once for a tenant without one, `mirror_skipped` for a
+   media version, which stays here (`services/ingest/managed.py`). Off on the lane; refused unless `RESIDENCY=us`.
 7. **The undo, verified.** The same bytes again, after a newer version retired them. First the tombstone: a
    source a person withdrew (`make retire`) is acked as `ingest_withdrawn` and nothing moves. Then `reactivate()`
    counts before it flips - the retired rows still here against the claim's `chunks`, the claim's `retired_at`
@@ -63,7 +68,9 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    nothing is flipped, and the worker takes the claim back and ingests the bytes as a fresh version (step 3 on;
    the carry-over reuses what the newer version still holds). Otherwise the rows come back with their stamps
    cleared, on the full profile their ids go back up from the rows' own vectors (`reupsert`) *before* the newer
-   version is retired in turn, and nothing is embedded (`ingest_reactivated`). The first undo flipped whatever
+   version is retired in turn, and nothing is embedded (`ingest_reactivated`); the managed mirror follows the undo
+   - the reactivated version's text read off its own rows, the newer version deleted (`after_undo`). The first
+   undo flipped whatever
    remained and retired the newer version regardless; after the window, that left a source with no current
    version at all.
 8. **Record.** `documents/` (chunks, reused, embedded, generation), `sources/` (the ledger row: doc_key,
@@ -172,6 +179,11 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
   reconcile job). It takes each queued claim in a transaction, fetches the bytes by generation and runs the
   worker's own `index_document()`; two runs never index one document twice. A document it fails stays `failed`
   with its reason, and the job never retakes it: `make reindex`, or the same bytes uploaded again, is the way back.
+- The managed mirror (P9.2) is one-directional and eventually consistent: the worker, the batch job, the walk's
+  retirement and `make retire` write to the tenant's stores (`managed.py`), an import is an operation the stores
+  finish in minutes, and nothing reads the stores back yet - `make managed-status` compares each store with the
+  ledger by hand, and the walk's `mirror_missing` / `mirror_stale` / `mirror_orphan` actions are P9.3. The
+  `rag_engine` and `vertex_search` retrieval backends that read the stores are P9.4 and P9.5.
 - The graph (4.6) is built by hand, not by the worker: `make graph TENANT=` extracts over the tenant's current
   chunks (cached by `chunk_hash`, so a re-issued document costs its changed chunks only) and loads `graph_nodes` /
   `graph_edges` with the lesson's own `FirestoreGraph` (`shared/documind_graph.py`). A version swap leaves a node's

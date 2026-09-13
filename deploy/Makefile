@@ -18,6 +18,8 @@
 #     make retire / restore SOURCE=                 withdraw a document (a tombstone the nightly walk honours), bring it back
 #     make batch / queued / batch-job            the batch lane (13 September 2026): drain the queue now, list it, declare the job
 #     make graph TENANT=acme                     build the tenant's knowledge graph (4.6) for RETRIEVAL_GRAPH=on|auto
+#     make managed-status / rag-corpus TENANT=   the managed mirror (P9, 4.3 + 4.4): the stores against the ledger; a tenant's RAG Engine corpus
+#     make rag-engine-enable                     once per project: RAG Engine in serverless mode + vectorsearch (4.3's one-time prep)
 #     make down  PROJECT=...                        the services, then terraform destroy; names what only project deletion removes
 #
 # PROFILE=lean (the default) is the Module 4 lane: the API, the UI and the ingest worker on
@@ -98,6 +100,14 @@ RECONCILE_JOB   ?= false
 # API (shared/documind_graph.py; make graph builds it): both off until asked for, the graph judged on a candidate first
 BATCH_JOB       ?= false
 RETRIEVAL_GRAPH ?= off
+# P9 (13 September 2026, managed-retrieval-plan-2026-09-13.md): the managed mirror - the ledger's current versions copied
+# into a RAG Engine corpus (4.3) and / or a Vertex AI Search data store (4.4) per tenant, for the rag_engine and
+# vertex_search backends. MANAGED_MIRROR is the worker's, the batch job's and the walk's switch (off | rag_engine |
+# vertex_search | both; refused unless RESIDENCY=us); MANAGED_SEARCH=true declares the data stores (managed.tf);
+# RAG_LOCATION is the corpora's region (serverless: us-central1 only). Off on the lane; a candidate judges them.
+MANAGED_MIRROR  ?= off
+MANAGED_SEARCH  ?= false
+RAG_LOCATION    ?= us-central1
 # 12 September 2026 (deploy/INDEXING.md): the retention window a retired chunk row lives for (the TTL policy's
 # number, variables.tf), the ONE declared embedding both the worker and the API run (variables.tf), and the ingest
 # image the nightly job runs (reconcile.tf declares the job; make reconcile-job is an apply with the switch on).
@@ -139,6 +149,8 @@ TF_VARS = -var project_id=$(PROJECT) \
           -var deploy_ref=$(DEPLOY_REF) \
           -var reconcile_job=$(RECONCILE_JOB) \
           -var batch_job=$(BATCH_JOB) \
+          -var managed_search=$(MANAGED_SEARCH) \
+          -var managed_mirror=$(MANAGED_MIRROR) \
           -var reconcile_image=$(RECONCILE_IMAGE) \
           -var retention_days=$(RETENTION_DAYS) \
           -var embedding_model=$(EMBEDDING_MODEL) \
@@ -168,7 +180,7 @@ SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-
         gpu-quota gpu-cap gpu-cap-off off off-now \
         release-candidate record-candidate promote rollback smoke-all usage ingest-one poison dlq down-services \
         reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex \
-        batch queued batch-job graph
+        batch queued batch-job graph managed-status rag-corpus rag-engine-enable
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -322,6 +334,7 @@ deploy-services: guard-project
 	  GENERATOR_MODEL=$(GENERATOR_MODEL) RAG_MODEL_BASE=$(RAG_MODEL_BASE) ROUTING=$(ROUTING) MODEL_BACKEND=$(MODEL_BACKEND) ARMOR=$(ARMOR) SEMANTIC_CACHE=$(SEMANTIC_CACHE) \
   RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY) RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH) \
 	  BATCH_JOB_NAME=$(if $(filter true,$(BATCH_JOB)),documind-ingest-batch,) \
+	  MANAGED_MIRROR=$(MANAGED_MIRROR) RAG_LOCATION=$(RAG_LOCATION) \
 	  RETENTION_DAYS=$$RETENTION_DAYS EMBEDDING_MODEL=$$EMBEDDING_MODEL EMBEDDING_VERSION=$$EMBEDDING_VERSION \
 	  BUDGET_USD=$(BUDGET_USD) SPEND_PCT=$(SPEND_PCT) \
 	  sh -ec "$$(sed -n '/^# ---- DEPLOY ----/,/^# ---- [A-Z_]* ----$$/p' $$f | grep -v '^# ----')"; \
@@ -568,6 +581,7 @@ down: guard-project down-services
 	echo ">>   Firestore (default): delete_protection_state = DELETE_PROTECTION_ENABLED (firestore.tf) - chunks, ledger, rosters stay"; \
 	echo ">>   buckets that hold objects: uploads, datasets, audit (force_destroy = false, storage.tf) - and on the full profile the audit bucket's LOCKED retention policy blocks even the project's deletion for five years, by design"; \
 	echo ">>   a tuned endpoint from make tune (evals/tune.py: Vertex AI, not Terraform)"; \
+	echo ">>   a RAG Engine corpus from make rag-corpus (managed.py: Vertex AI, not Terraform) - it bills storage until deleted: gcloud ai rag-corpora ... or 4.3's cleanup cell"; \
 	echo ">>   the BigQuery views make bq-views applied (terraform/sql/*.sql, through bq, not Terraform)"; \
 	echo ">> Delete the throwaway project to stop all billing:"; \
 	echo ">>   gcloud projects delete $(PROJECT)"; exit $$rc
@@ -848,7 +862,8 @@ reindex: guard-project
 # just taken down. make restore is the way back.
 retire: guard-project
 	@test -n "$(SOURCE)" || (echo "SOURCE=<tenant/name or gs://...> is required"; exit 2); \
-	$(PY) services/ingest/reconcile.py --project $(PROJECT) --retire "$(SOURCE)" --apply
+	MANAGED_MIRROR=$(MANAGED_MIRROR) RESIDENCY=$(RESIDENCY) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
+	  $(PY) services/ingest/reconcile.py --project $(PROJECT) --retire "$(SOURCE)" --apply
 
 # bring a withdrawn source back (SOURCE= as for retire): the tombstone is cleared and the object rewritten onto
 # itself, so the worker's own path returns it - ingest_reactivated inside the RETENTION_DAYS undo window (nothing
@@ -860,7 +875,8 @@ restore: guard-project
 
 # the full reconciliation: the bucket's current generations against sources/. Prints the plan; APPLY=1 acts.
 reconcile: guard-project
-	$(PY) services/ingest/reconcile.py --project $(PROJECT) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
+	MANAGED_MIRROR=$(MANAGED_MIRROR) RESIDENCY=$(RESIDENCY) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
+	  $(PY) services/ingest/reconcile.py --project $(PROJECT) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
 
 # once, after the ledger ships onto a lane that predates it: chunks and documents get current=true, a doc_key and
 # a sources/ row each; then RETRIEVAL_CURRENT_ONLY=on is safe to flip (on a candidate first).
@@ -890,6 +906,27 @@ batch: guard-project
 	gcloud run jobs execute documind-ingest-batch --region $(REGION) --project $(PROJECT) --wait
 queued: guard-project
 	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) batch.py --project $(PROJECT) --queued
+
+# ---------- the managed mirror (P9, 13 September 2026): 4.3's RAG Engine and 4.4's Vertex AI Search per tenant ----------
+# services/ingest/managed.py. The stores are declared, never created by the worker: MANAGED_SEARCH=true on make plan /
+# make up declares a Vertex AI Search data store per tenant (managed.tf, the tenants variable); rag-corpus creates a
+# tenant's RAG Engine corpus once, by name, after rag-engine-enable has put the project in serverless mode (4.3's
+# one-time prep: the default store is allowlist-only, and vectorsearch.googleapis.com backs the serverless one).
+# managed-status reads every store against the ledger. Then make deploy-services MANAGED_MIRROR=both (or one) and
+# every version the worker swaps current is mirrored; the same value on make plan / make up gives it to the jobs.
+# Needs, on Cloud Shell: pip install --user google-cloud-aiplatform==1.153.1 google-cloud-discoveryengine==0.13.11 google-cloud-firestore==2.30.0
+rag-engine-enable: guard-project
+	gcloud services enable vectorsearch.googleapis.com aiplatform.googleapis.com --project $(PROJECT)
+	curl -sS -X PATCH -H "Authorization: Bearer $$(gcloud auth print-access-token)" -H "Content-Type: application/json" \
+	  "https://$(RAG_LOCATION)-aiplatform.googleapis.com/v1beta1/projects/$(PROJECT)/locations/$(RAG_LOCATION)/ragEngineConfig" \
+	  -d '{"ragManagedDbConfig": {"serverless": {}}}' | head -c 400; echo
+	@echo ">> RAG Engine: serverless mode requested in $(RAG_LOCATION) (eventually consistent: a first make rag-corpus may need a minute)"
+rag-corpus: guard-project
+	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) EMBEDDING_MODEL=$(EMBEDDING_MODEL) \
+	  $(PY) managed.py --project $(PROJECT) --create-corpus --tenant $(TENANT)
+managed-status: guard-project
+	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit RESIDENCY=$(RESIDENCY) \
+	  $(PY) managed.py --project $(PROJECT) --status --mode $(if $(filter off,$(MANAGED_MIRROR)),both,$(MANAGED_MIRROR)) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),)
 
 # ---------- 4.6's graph, on the lane (13 September 2026) ----------
 # services/ingest/graph.py: the tenant's current chunks through the lesson's extraction, resolution and build, written

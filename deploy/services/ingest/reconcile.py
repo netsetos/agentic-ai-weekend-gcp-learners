@@ -221,7 +221,11 @@ def main() -> int:
     from google.cloud import firestore, storage
     from contracts import sha256_of
     from idempotency import record_source, refresh_fingerprint, retire_previous
+    from managed import Mirror
     db = firestore.Client(project=a.project)
+    # The managed mirror (P9.2): a version this walk retires leaves the tenant's managed stores too. MANAGED_MIRROR
+    # and RESIDENCY come from the shell (make reconcile / make retire) or the job's env (reconcile.tf); off is silent.
+    mirror = Mirror.from_env(db, os.environ.get("MANAGED_MIRROR", "off"), os.environ.get("RESIDENCY", "us"))
     gcs = storage.Client(project=a.project)
     bucket_name = a.bucket or f"{a.project}-uploads"
     bucket = gcs.bucket(bucket_name)
@@ -299,6 +303,7 @@ def main() -> int:
                   f"row withdrawn - the object stays, the night's walk leaves it, make restore SOURCE= brings it back (--apply to do it)")
             return 0
         gone = retire_previous(db, tenant, uri, None, expire_at=expire_at)
+        mirror.retired(tenant, gone.get("retired_doc_keys", []), "withdrawn")
         db.collection("sources").document(source_id_for(tenant, name)).set(
             {"status": "withdrawn", "withdrawn_at": firestore.SERVER_TIMESTAMP}, merge=True)
         fp = refresh_fingerprint(db, tenant, "reconcile_withdrawn")
@@ -407,6 +412,7 @@ def main() -> int:
         uri = f"gs://{bucket_name}/{act['name']}"
         if act["action"] == "retire":
             gone = retire_previous(db, act["tenant_id"], act["gcs_uri"] or uri, None, expire_at=expire_at)
+            mirror.retired(act["tenant_id"], gone.get("retired_doc_keys", []), "retired")
             db.collection("sources").document(source_id_for(act["tenant_id"], act["name"])).set(
                 {"status": "retired", "retired_at": firestore.SERVER_TIMESTAMP}, merge=True)
             touched.add(act["tenant_id"])

@@ -26,6 +26,7 @@ from idempotency import (claim, current_chunks, finish, reactivate, record_sourc
                          retire_previous, source_id_for, stale_generation, status_of, swap_versions, withdrawn)
 from indexer import (EMBEDDING_MODEL, EMBEDDING_VERSION, embed_with_carry_over, mirror_to_bigquery,
                      mirror_to_firestore, remove_datapoints, reupsert, to_datapoints, upsert)
+from managed import Mirror
 from parser import parse
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
@@ -33,6 +34,11 @@ log = logging.getLogger("documind.ingest")
 app = FastAPI()
 _db = firestore.Client()
 _gcs = storage.Client()
+# THE MANAGED MIRROR (P9.2, 13 September 2026): the tenant's RAG Engine corpus and / or Vertex AI Search data store
+# (lessons 4.3 and 4.4), kept to the ledger's current versions from here - after the swap, after the undo - and
+# never able to fail an ingest (managed.py). MANAGED_MIRROR=off on the lane; anything else is refused at startup
+# unless RESIDENCY=us, because neither store keeps the India story.
+_mirror = Mirror.from_env(_db)
 INDEX_NAME = os.environ.get("VECTOR_INDEX_NAME", "")
 PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 PROCESSOR_ID = os.environ.get("DOCAI_PROCESSOR_ID", "")    # docai.tf outputs it
@@ -337,6 +343,9 @@ async def push(request: Request):
                 gone = retire_previous(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key, expire_at=_expire_at(RETENTION_DAYS))
                 if INDEX_NAME and gone["retired_ids"]:
                     remove_datapoints(INDEX_NAME, gone["retired_ids"])
+                if _mirror.active:               # the managed stores follow the undo: the old text back, the newer version out
+                    _mirror.after_undo(doc.tenant_id, doc.gcs_uri, doc.doc_key, gone,
+                                       {"generation": str(msg.generation), "name": msg.name})
                 record_source(_db, doc.tenant_id, msg.name, doc.gcs_uri, doc.doc_key, msg.generation,
                               doc.sha256, back, effective_from_of(msg.name, None),
                               reused=back, embedded=0, retired=gone["retired_chunks"],
@@ -401,6 +410,7 @@ def index_document(doc: DocumentContract, msg: IngestMessage, content: bytes, la
     what that means for it."""
     gone = {"activated": 0, "retired_doc_keys": [], "retired_ids": [], "retired_chunks": 0}
     counts = {"reused": 0, "embedded": 0}
+    text = None                                          # a media document has none: the mirror below skips it
     try:
         image_findings = []
         if msg.content_type in MEDIA_TYPES:
@@ -474,6 +484,11 @@ def index_document(doc: DocumentContract, msg: IngestMessage, content: bytes, la
             upsert(INDEX_NAME, to_datapoints(doc, chunks, vectors))
             if gone["retired_ids"]:
                 remove_datapoints(INDEX_NAME, gone["retired_ids"])
+        # THE MANAGED MIRROR (P9.2): the version that just became current goes to the tenant's managed stores as the
+        # text these rows hold, and the versions the swap retired leave them - one line per store, never a failed
+        # ingest (managed.py). A media version stays on this index alone (the plan's D4).
+        if _mirror.active and text is not None:
+            _mirror.after_swap(doc, text, gone, {"generation": str(msg.generation), "name": msg.name})
         # The SQL lane reads the REAL chunks (5.5, gap G9): the same rows, with the verdict
         # the scan above just produced, so pii_flag in BigQuery is this worker's - never a
         # second scanner's that could disagree.

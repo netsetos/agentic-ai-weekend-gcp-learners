@@ -244,7 +244,13 @@ for the batch lane's consumer (13 September 2026): `documind-ingest-batch`, a Cl
 by the worker as it queues and hourly regardless (`make batch` runs it now, `make queued` lists the queue).
 And 4.6's graph is on the API: `make graph TENANT=` builds it with the lesson's `FirestoreGraph`
 (`shared/documind_graph.py`, the notebook's text verbatim, gated), and `RETRIEVAL_GRAPH=on|auto` walks it in
-front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto` first.
+front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto` first. The managed stores of
+4.3 and 4.4 are mirrors of the ledger (P9, `course-bibles/managed-retrieval-plan-2026-09-13.md`):
+`MANAGED_MIRROR=rag_engine|vertex_search|both` copies every version the worker swaps current, as the text its rows
+hold, into the tenant's RAG Engine corpus (`make rag-engine-enable` once, `make rag-corpus TENANT=` per tenant)
+and / or Vertex AI Search data store (`managed.tf`, `MANAGED_SEARCH=true`), and takes a retired version out;
+`make managed-status` reads every store against the ledger. Off on the lane and refused unless `RESIDENCY=us`;
+the backends that read the stores are the plan's next rows.
 
 ---
 

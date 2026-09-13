@@ -156,10 +156,10 @@ locals {
     "roles/modelarmor.user",
   ]
   ingest_roles = [
-    "roles/storage.objectViewer",     # read the uploaded object, not write it
-    "roles/datastore.user",           # documents/ claims + chunks/
+    "roles/storage.objectViewer", # read the uploaded object, not write it
+    "roles/datastore.user",       # documents/ claims + chunks/
     "roles/documentai.apiUser",
-    "roles/aiplatform.user",          # embeddings + streaming upserts
+    "roles/aiplatform.user", # embeddings + streaming upserts
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
     # 12.5's worker scans every chunk before indexing it. Without this the
@@ -167,6 +167,10 @@ locals {
     "roles/dlp.user",
     # ...and writes doc.upload / dlp.finding events to the audit bucket.
     "roles/storage.objectCreator",
+    # The managed mirror (P9.2, 13 September 2026): a version's text into the tenant's Vertex AI Search data store
+    # (managed.tf) and out again on retirement. RAG Engine's corpus rides roles/aiplatform.user above. Nothing
+    # here while MANAGED_MIRROR=off; without it the first mirror_failed names the 403.
+    "roles/discoveryengine.editor",
   ]
   cicd_roles = [
     "roles/cloudbuild.builds.editor",
@@ -204,8 +208,8 @@ locals {
   # in a set of strings must be known values"). The keys below are literals; the
   # unknown part rides in each.value, which is allowed.
   chat_roles = [
-    "roles/aiplatform.user",   # Gemini through langchain-google-genai (shared/profile.py)
-    "roles/datastore.user",    # the tenant roster (shared/tenancy.py)
+    "roles/aiplatform.user", # Gemini through langchain-google-genai (shared/profile.py)
+    "roles/datastore.user",  # the tenant roster (shared/tenancy.py)
     # rag-api, through the ONE retrieve(): roles/run.invoker on documind-api, bound in lesson-12.2.sh
     # since 12 September 2026 - not here, not project-wide (the caller graph above).
     "roles/logging.logWriter",
@@ -217,10 +221,10 @@ locals {
   mcp_roles = [
     # rag-api, through the ONE retrieve(): roles/run.invoker on documind-api, bound in lesson-12.2.sh
     # since 12 September 2026 - not here, not project-wide (the caller graph above).
-    "roles/datastore.viewer",  # the roster (tenancy), the ingest claims and chunk counts - reads only
+    "roles/datastore.viewer", # the roster (tenancy), the ingest claims and chunk counts - reads only
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
-    "roles/storage.objectCreator",   # audit rows, when AUDIT_BUCKET is set (full profile)
+    "roles/storage.objectCreator", # audit rows, when AUDIT_BUCKET is set (full profile)
   ]
 
   # Nothing at project scope (12 September 2026). "May knock on every service" was the one role
@@ -233,7 +237,7 @@ locals {
   agent_roles = [
     # documind-mcp, and only that: roles/run.invoker bound on the MCP server in lesson-7.2.sh since
     # 12 September 2026 - not here, where "only that" was a comment and the grant was project-wide.
-    "roles/aiplatform.user",   # Gemini, through ADK
+    "roles/aiplatform.user", # Gemini, through ADK
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
   ]
@@ -251,14 +255,14 @@ locals {
     # even when it is the caller. Without this the release is cut and then dies at
     # rollout, naming the account the operator deliberately chose - which reads as
     # "wrong account" and is really "missing self-actAs".
-    cicd   = google_service_account.cicd.name
+    cicd = google_service_account.cicd.name
   }
   admin_roles = [
     "roles/monitoring.viewer",
     "roles/logging.viewer",
     "roles/datastore.user",
     "roles/bigquery.jobUser",
-    "roles/run.developer",   # budget-guard fn calls run_v2.update_service to set min_instances=0
+    "roles/run.developer", # budget-guard fn calls run_v2.update_service to set min_instances=0
     # bigquery.jobUser lets admin-sa RUN a query; it does not let it READ a
     # table. Both are needed, and the failure without dataViewer is a
     # permission error on the first SELECT rather than at deploy time.

@@ -50,6 +50,14 @@ resource "google_cloud_run_v2_job" "reconcile" {
           name  = "RETENTION_DAYS"
           value = tostring(var.retention_days)
         }
+        env {
+          name  = "MANAGED_MIRROR" # the managed mirror (P9.2): a version the walk retires leaves the stores too
+          value = var.managed_mirror
+        }
+        env {
+          name  = "RESIDENCY"
+          value = var.residency
+        }
       }
     }
   }

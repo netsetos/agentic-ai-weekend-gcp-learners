@@ -69,6 +69,10 @@ resource "google_cloud_run_v2_job" "ingest_batch" {
           name  = "BQ_CHUNK_TABLE"
           value = local.full ? "${var.project_id}.rag_data.chunk_source" : ""
         }
+        env {
+          name  = "MANAGED_MIRROR" # the managed mirror (P9.2): the same switch the worker runs with
+          value = var.managed_mirror
+        }
       }
     }
   }

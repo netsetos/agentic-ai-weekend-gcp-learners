@@ -7,6 +7,8 @@ google-cloud-storage==3.13.1
 google-cloud-documentai==3.15.0
 pypdf==6.17.0
 google-cloud-aiplatform==1.153.1
+# the managed mirror (P9.2): a Vertex AI Search data store per tenant; RAG Engine rides aiplatform above
+google-cloud-discoveryengine==0.13.11
 google-genai==2.22.0
 google-cloud-dlp==3.39.0
 # 9.6: shared/pii.py re-encodes a page render under DLP's 0.5 MiB inspect limit before scanning its pixels.
