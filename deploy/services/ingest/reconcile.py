@@ -28,7 +28,7 @@ is `withdrawn`: its object is kept, and the first version of this planner read "
 the bucket" and re-ingested it the same night - the worker's undo brought back what a person had just taken
 down. Now the plan says "withdrawn, object kept" and does nothing; --restore (make restore) clears the tombstone
 and rewrites the object so the worker's own path brings it back. And a document the worker handed to the batch
-lane (`queued` on documents/, no consumer built) is reported as queued, not hashed and not rewritten every night.
+lane (`queued` on documents/, the batch job's to take) is reported as queued, not hashed and not rewritten every night.
 Neither counts as drift.
 """
 from __future__ import annotations
@@ -62,7 +62,7 @@ def plan(objects: list[dict], ledger: dict[str, dict], documents: dict[str, dict
     documents: {doc_key: {status, gcs_uri, generation?}} - the per-version claims
     Returns actions: retire | reingest | backfill | check_bytes | ok - and two that act on nothing (12 September
     2026): `withdrawn`, a source a person retired by hand, whose object stays where it is until make restore; and
-    `queued`, a generation the worker handed to the batch lane (its consumer is not built), which must not be
+    `queued`, a generation the worker handed to the batch lane (the batch job indexes it, batch.py), which must not be
     hashed or rewritten onto itself every night. Neither is drift."""
     actions = []
     seen = set()
@@ -79,7 +79,7 @@ def plan(objects: list[dict], ledger: dict[str, dict], documents: dict[str, dict
         if (o["name"], str(o["generation"])) in queued or (o["name"], "") in queued:
             actions.append({"action": "queued", "name": o["name"], "tenant_id": o["tenant_id"],
                             "generation": o["generation"],
-                            "why": "handed to the batch lane; no consumer is built, the claim says queued"})
+                            "why": "handed to the batch lane; the batch job indexes it, the claim says queued"})
         elif row is None:
             # Never in the ledger. Same bytes may already be indexed (a lane older than the ledger): that is a
             # backfill, decided once the bytes are hashed; otherwise ingest it through the normal path.

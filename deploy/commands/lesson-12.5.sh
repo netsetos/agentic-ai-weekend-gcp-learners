@@ -16,6 +16,9 @@
 # 12 September 2026 (deploy/INDEXING.md): RETENTION_DAYS stamps expire_at on every retired row - the TTL policy's
 # number, variables.tf's retention_days; EMBEDDING_MODEL / EMBEDDING_VERSION are the ONE declared embedding, stamped
 # on every chunk row - the API embeds its queries with the same pair. make deploy-services passes all three.
+# 13 September 2026: REGION and BATCH_JOB are the batch lane's consumer - the Cloud Run job batch.tf declares on this
+# image (make batch-job), which the worker starts by name the moment it queues a document over MAX_INLINE_PAGES;
+# empty until make deploy-services BATCH_JOB=true, and then the hourly schedule alone drains the queue.
 gcloud run deploy documind-ingest \
   --image=${REGION:-us-central1}-docker.pkg.dev/$PROJECT/documind/ingest:$GIT_SHA \
   --region=${REGION:-us-central1} --platform=managed \
@@ -25,7 +28,7 @@ gcloud run deploy documind-ingest \
   --min-instances=0 --max-instances=30 \
   --execution-environment=gen2 \
   --service-account=documind-ingest-sa@$PROJECT.iam.gserviceaccount.com \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RESIDENCY=${RESIDENCY:-us}|DOCAI_PROCESSOR_ID=$DOCAI_PROCESSOR_ID|AUDIT_BUCKET=$PROJECT-audit|VECTOR_INDEX_NAME=$VECTOR_INDEX_NAME|BQ_CHUNK_TABLE=$BQ_CHUNK_TABLE|RETENTION_DAYS=${RETENTION_DAYS-30}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}"
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RESIDENCY=${RESIDENCY:-us}|DOCAI_PROCESSOR_ID=$DOCAI_PROCESSOR_ID|AUDIT_BUCKET=$PROJECT-audit|VECTOR_INDEX_NAME=$VECTOR_INDEX_NAME|BQ_CHUNK_TABLE=$BQ_CHUNK_TABLE|RETENTION_DAYS=${RETENTION_DAYS-30}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}|REGION=${REGION:-us-central1}|BATCH_JOB=${BATCH_JOB_NAME-}"
 
 # Pub/Sub calls the worker AS the ingest service account; the account has to be allowed in.
 # The subscription already exists, pointing at this service's deterministic URL.

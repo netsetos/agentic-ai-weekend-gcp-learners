@@ -238,7 +238,13 @@ is a release: `make reindex` runs the offline gate first, the golden set has a `
 Ingestion is the same in both: a Cloud Storage notification on the uploads bucket into the
 `documind-ingest` topic, a push subscription with an OIDC token, five attempts, then the DLQ
 (`eventarc.tf`). The worker sends PDFs to Document AI in 15-page slices, which is the online
-limit, so the corpus's hundred-page Acts go through inline.
+limit, so the corpus's hundred-page Acts go through inline. Anything over `MAX_INLINE_PAGES` (250) is queued
+for the batch lane's consumer (13 September 2026): `documind-ingest-batch`, a Cloud Run job on the ingest image
+(`batch.tf`, `make batch-job`) that runs the worker's own `index_document()` with no request deadline, started
+by the worker as it queues and hourly regardless (`make batch` runs it now, `make queued` lists the queue).
+And 4.6's graph is on the API: `make graph TENANT=` builds it with the lesson's `FirestoreGraph`
+(`shared/documind_graph.py`, the notebook's text verbatim, gated), and `RETRIEVAL_GRAPH=on|auto` walks it in
+front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto` first.
 
 ---
 

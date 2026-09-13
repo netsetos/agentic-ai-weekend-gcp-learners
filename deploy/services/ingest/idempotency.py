@@ -135,6 +135,29 @@ def current_chunks(db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: 
     return n
 
 
+def take_batch(db: firestore.Client, doc_key: str) -> bool:
+    """The batch job takes a queued claim (13 September 2026): documents/{doc_key} queued -> processing, in a transaction,
+    so two runs of the job never index one document twice. False when the claim is not queued any more - indexed,
+    processing, failed or gone. The claim keeps its fields (the object, the pages, the generation); ingest_batch/ says
+    which run took it."""
+    ref = db.collection("documents").document(doc_key)
+
+    @firestore.transactional
+    def _take(tx: firestore.Transaction) -> bool:
+        snap = ref.get(transaction=tx)
+        if not snap.exists or snap.get("status") != "queued":
+            return False
+        tx.set(ref, {**(snap.to_dict() or {}), "status": "processing", "lane": "batch",
+                     "claimed_at": firestore.SERVER_TIMESTAMP})
+        return True
+
+    won = _take(db.transaction())
+    if won:
+        db.collection("ingest_batch").document(doc_key).set(
+            {"status": "processing", "taken_at": firestore.SERVER_TIMESTAMP}, merge=True)
+    return won
+
+
 def stale_generation(db: firestore.Client, tenant_id: str, name: str, generation) -> str | None:
     """The generation guard. Returns the ledger's generation when this event's is OLDER than it - a late redelivery
     the worker must ignore - and None when the event is as new as the ledger or newer, or the ledger has no row."""

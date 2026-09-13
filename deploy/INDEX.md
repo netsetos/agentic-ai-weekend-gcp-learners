@@ -7,14 +7,14 @@ Lesson ids ending in `p` are practice labs.
 
 | Class | Code files | Data and docs |
 |---|---|---|
-| A owned: extracted verbatim from a notebook heredoc | 86 | 0 |
-| B pasted: a block carried verbatim by notebooks | 1 | 0 |
+| A owned: extracted verbatim from a notebook heredoc | 89 | 0 |
+| B pasted: a block carried verbatim by notebooks | 2 | 0 |
 | C used: imported, read, run or excerpted by notebook code | 75 | 25 |
 | D prose: named in a notebook's text only | 0 | 0 |
 | E unreferenced by any notebook | 0 | 42 |
-| total | 162 | 67 |
+| total | 166 | 67 |
 
-## A. owned: extracted verbatim from a notebook heredoc (86)
+## A. owned: extracted verbatim from a notebook heredoc (89)
 
 | File | Kind | Owner | Shown by |
 |---|---|---|---|
@@ -54,7 +54,9 @@ Lesson ids ending in `p` are practice labs.
 | `services/frontend/studio.py` | code | 12.4 | - |
 | `services/frontend/voice.py` | code | 12.4 | - |
 | `services/ingest/Dockerfile` | code | 12.5 | - |
+| `services/ingest/batch.py` | code | 12.5 | - |
 | `services/ingest/contracts.py` | code | 12.5 | - |
+| `services/ingest/graph.py` | code | 12.5 | - |
 | `services/ingest/idempotency.py` | code | 12.5 | - |
 | `services/ingest/indexer.py` | code | 12.5 | - |
 | `services/ingest/main.py` | code | 12.5 | - |
@@ -82,6 +84,7 @@ Lesson ids ending in `p` are practice labs.
 | `shared/tenancy.py` | code | 12.8 | - |
 | `terraform/alerts.tf` | code | 12.3 | - |
 | `terraform/backend.tf` | code | 12.1 | - |
+| `terraform/batch.tf` | code | 12.5 | - |
 | `terraform/budget.tf` | code | 12.1 | - |
 | `terraform/clouddeploy.tf` | code | 12.7 | - |
 | `terraform/cloudsql.tf` | code | 12.8 | - |
@@ -105,11 +108,12 @@ Lesson ids ending in `p` are practice labs.
 | `terraform/vector.tf` | code | 12.5 | - |
 | `terraform/wif.tf` | code | 12.7 | - |
 
-## B. pasted: a block carried verbatim by notebooks (1)
+## B. pasted: a block carried verbatim by notebooks (2)
 
 | File | Kind | Owner | Shown by |
 |---|---|---|---|
 | `shared/documind_corpus.py` | code | - | 2.3,4.2,4.2p,4.5,4.5p |
+| `shared/documind_graph.py` | code | - | 4.6 |
 
 ## C. used: imported, read, run or excerpted by notebook code (100)
 

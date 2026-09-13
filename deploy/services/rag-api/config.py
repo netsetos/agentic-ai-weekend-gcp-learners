@@ -3,9 +3,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 RETRIEVAL_BACKENDS = ("vector", "firestore")
 RETRIEVAL_MODES = ("dense", "hybrid")
+GRAPH_MODES = ("off", "on", "auto")          # 4.6's graph on the lane (13 September 2026, shared/documind_graph.py)
 
 
-def check_retrieval_modes(backend: str, mode: str) -> None:
+def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
     """RETRIEVAL_MODE against RETRIEVAL_BACKEND, at startup (12 September 2026, R06). Hybrid is Vector Search's
     HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so on the lean
     profile RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
@@ -14,6 +15,9 @@ def check_retrieval_modes(backend: str, mode: str) -> None:
     if backend not in RETRIEVAL_BACKENDS or mode not in RETRIEVAL_MODES:
         raise ValueError(f"RETRIEVAL_BACKEND={backend!r} RETRIEVAL_MODE={mode!r}: the backend is one of "
                          f"{'|'.join(RETRIEVAL_BACKENDS)} and the mode one of {'|'.join(RETRIEVAL_MODES)}")
+    if graph not in GRAPH_MODES:
+        raise ValueError(f"RETRIEVAL_GRAPH={graph!r}: one of {'|'.join(GRAPH_MODES)} - off touches nothing, on walks the tenant's "
+                         "graph for every question, auto only for a relational question with a seed entity (4.6's choose_mode)")
     if backend == "firestore" and mode == "hybrid":
         raise ValueError("RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: the Firestore backend (the lean profile) "
                          "is dense-only. Set RETRIEVAL_MODE=dense, or deploy the full profile with a Vector Search "
@@ -104,6 +108,14 @@ class Settings(BaseSettings):
     prompt_id: str = "documind-rag"
     prompt_version: str = "v3"
     retrieval_mode: str = "dense"          # dense | hybrid (4.5's hybrid.py)
+    # 4.6's graph, on the lane (13 September 2026; shared/documind_graph.py): off | on | auto. `on` walks the tenant's
+    # knowledge graph for every question and puts the chunks its nodes point at in front of the dense pool; `auto`
+    # walks it only when the question is relational AND a seed entity is found (4.6's choose_mode, no model call).
+    # The graph is built by make graph TENANT= (services/ingest/graph.py); a tenant with no graph is a dense answer,
+    # never an error. Judged on a candidate first, like every switch: make candidate RETRIEVAL_GRAPH=auto.
+    retrieval_graph: str = Field("off", alias="RETRIEVAL_GRAPH")
+    graph_hops: int = Field(1, alias="GRAPH_HOPS")          # 1 or 2: deeper walks return the whole tenant (4.6)
+    graph_cap: int = Field(20, alias="GRAPH_CAP")           # nodes per walk, the budget 4.5 defends
 
     # USD per 1M tokens, gemini-3.6-flash standard. 12.6 moves this to a
     # BigQuery model_prices table so a rate change is not a redeploy.
@@ -115,7 +127,7 @@ class Settings(BaseSettings):
         # Refused here, at import, so a revision with an impossible pair never serves: the deploy fails with the
         # message above instead of a service that runs dense and reports hybrid. /version reports the mode that
         # passed this check - the effective one.
-        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode)
+        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph)
         return self
 
 settings = Settings()

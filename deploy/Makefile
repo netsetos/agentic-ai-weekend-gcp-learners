@@ -16,6 +16,8 @@
 #     make eval-live PROJECT=... [SOURCE=<doc>]     the golden set against the deployed API (scoped to one document's rows)
 #     make reindex FILE= NAME= / sources / purge     the document lifecycle (deploy/INDEXING.md); smoke-reindex smokes it
 #     make retire / restore SOURCE=                 withdraw a document (a tombstone the nightly walk honours), bring it back
+#     make batch / queued / batch-job            the batch lane (13 September 2026): drain the queue now, list it, declare the job
+#     make graph TENANT=acme                     build the tenant's knowledge graph (4.6) for RETRIEVAL_GRAPH=on|auto
 #     make down  PROJECT=...                        the services, then terraform destroy; names what only project deletion removes
 #
 # PROFILE=lean (the default) is the Module 4 lane: the API, the UI and the ingest worker on
@@ -92,6 +94,10 @@ DEPLOY_REF      ?= refs/heads/main
 # vector index is built and make backfill-current has run; RECONCILE_JOB=true schedules the nightly reconcile
 RETRIEVAL_CURRENT_ONLY ?= off
 RECONCILE_JOB   ?= false
+# 13 September 2026: the batch lane's consumer (batch.tf, on the ingest image RECONCILE_IMAGE names) and 4.6's graph on the
+# API (shared/documind_graph.py; make graph builds it): both off until asked for, the graph judged on a candidate first
+BATCH_JOB       ?= false
+RETRIEVAL_GRAPH ?= off
 # 12 September 2026 (deploy/INDEXING.md): the retention window a retired chunk row lives for (the TTL policy's
 # number, variables.tf), the ONE declared embedding both the worker and the API run (variables.tf), and the ingest
 # image the nightly job runs (reconcile.tf declares the job; make reconcile-job is an apply with the switch on).
@@ -132,6 +138,7 @@ TF_VARS = -var project_id=$(PROJECT) \
           -var 'alert_emails=$(ALERT_EMAILS_JSON)' \
           -var deploy_ref=$(DEPLOY_REF) \
           -var reconcile_job=$(RECONCILE_JOB) \
+          -var batch_job=$(BATCH_JOB) \
           -var reconcile_image=$(RECONCILE_IMAGE) \
           -var retention_days=$(RETENTION_DAYS) \
           -var embedding_model=$(EMBEDDING_MODEL) \
@@ -160,7 +167,8 @@ SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-
         deploy-gateway gateway-off smoke-gateway smoke-slm build-vllm deploy-vllm vllm-off gke-up gke-down compare \
         gpu-quota gpu-cap gpu-cap-off off off-now \
         release-candidate record-candidate promote rollback smoke-all usage ingest-one poison dlq down-services \
-        reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex
+        reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex \
+        batch queued batch-job graph
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -312,7 +320,8 @@ deploy-services: guard-project
 	  BQ_CHUNK_TABLE=$$BQ_CHUNK_TABLE CHAT_URL=$$CHAT_URL \
 	  CHAT_SQL_FLAGS="$$CHAT_SQL_FLAGS" CHAT_EXTRA_ENV="$$CHAT_EXTRA_ENV" \
 	  GENERATOR_MODEL=$(GENERATOR_MODEL) RAG_MODEL_BASE=$(RAG_MODEL_BASE) ROUTING=$(ROUTING) MODEL_BACKEND=$(MODEL_BACKEND) ARMOR=$(ARMOR) SEMANTIC_CACHE=$(SEMANTIC_CACHE) \
-  RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY) \
+  RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY) RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH) \
+	  BATCH_JOB_NAME=$(if $(filter true,$(BATCH_JOB)),documind-ingest-batch,) \
 	  RETENTION_DAYS=$$RETENTION_DAYS EMBEDDING_MODEL=$$EMBEDDING_MODEL EMBEDDING_VERSION=$$EMBEDDING_VERSION \
 	  BUDGET_USD=$(BUDGET_USD) SPEND_PCT=$(SPEND_PCT) \
 	  sh -ec "$$(sed -n '/^# ---- DEPLOY ----/,/^# ---- [A-Z_]* ----$$/p' $$f | grep -v '^# ----')"; \
@@ -486,7 +495,7 @@ tune: guard-project
 #   make eval-live API=https://candidate---documind-api-NUMBER.us-central1.run.app
 candidate: guard-project
 	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --no-traffic --tag candidate \
-	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
+	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
 	@$(MAKE) --no-print-directory record-candidate PROJECT=$(PROJECT) REGION=$(REGION)
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	echo ">> candidate: https://candidate---documind-api-$$NUMBER.$(REGION).run.app (no traffic; remove with gcloud run services update-traffic documind-api --remove-tags candidate)"
@@ -865,6 +874,32 @@ reconcile-job: guard-project
 	cd $(TF_DIR) && $(TF_INIT) && terraform apply -input=false -auto-approve $(TF_VARS)
 	@echo ">> documind-reconcile declared on $(RECONCILE_IMAGE) and scheduled 23:30 IST (reconcile.tf); gcloud run jobs execute documind-reconcile --region $(REGION) --project $(PROJECT) runs it now"
 	@echo ">> keep RECONCILE_JOB=true on every later make plan / make up, or the next apply removes the job and its schedule"
+
+# ---------- the batch lane (13 September 2026): the consumer ----------
+# A document over MAX_INLINE_PAGES is queued by the worker (ingest_batch/{doc_key}, the claim says queued) and indexed by
+# documind-ingest-batch: a Cloud Run job on the ingest image (batch.tf), which the worker starts as it queues (BATCH_JOB
+# in its environment, set by deploy-services once BATCH_JOB=true) and an hourly schedule backstops. batch-job is an apply
+# with the switch on, like reconcile-job; batch starts the job now and waits; queued lists the queue from the shell
+# (needs google-cloud-firestore, like make roster). Keep BATCH_JOB=true on every later make plan / make up.
+batch-job: BATCH_JOB = true
+batch-job: guard-project
+	cd $(TF_DIR) && $(TF_INIT) && terraform apply -input=false -auto-approve $(TF_VARS)
+	@echo ">> documind-ingest-batch declared on $(RECONCILE_IMAGE) and scheduled hourly (batch.tf); the worker starts it as it queues once"
+	@echo ">> make deploy-services BATCH_JOB=true tells the worker the job's name (BATCH_JOB in commands/lesson-12.5.sh)"
+batch: guard-project
+	gcloud run jobs execute documind-ingest-batch --region $(REGION) --project $(PROJECT) --wait
+queued: guard-project
+	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) batch.py --project $(PROJECT) --queued
+
+# ---------- 4.6's graph, on the lane (13 September 2026) ----------
+# services/ingest/graph.py: the tenant's current chunks through the lesson's extraction, resolution and build, written
+# with shared/documind_graph.FirestoreGraph - the class the notebook runs - into graph_nodes / graph_edges. Then the API
+# reads it: make candidate RETRIEVAL_GRAPH=auto (a relational question with a seed entity) or =on (every question), the
+# gate on the candidate, make promote. GRAPH_ARGS="--limit 200" is the bill; --ask "..." walks it for one question.
+# Needs: pip install --user google-genai==2.22.0 google-cloud-firestore==2.30.0 numpy
+GRAPH_ARGS ?=
+graph: guard-project
+	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) PYTHONPATH=../.. $(PY) graph.py --project $(PROJECT) --tenant $(TENANT) $(GRAPH_ARGS)
 
 # the versions view from the shell: every source's current version, generation, what the last reindex cost, the date
 # it declares, the corpus fingerprint - the rows GET /v1/sources serves and the UI's Documents page renders.

@@ -234,6 +234,8 @@ def usage_row(req, user, ans_tokens_in, ans_tokens_out, cached, latency_ms,
             "model": model,
             "prompt_version": settings.prompt_version,
             "retrieval_mode": settings.retrieval_mode,
+            # 4.6's graph on the lane (13 September 2026): the switch, and how many of the pool's chunks the walk put there
+            "retrieval_graph": settings.retrieval_graph, "graph_chunks": stages.get("graph_chunks", 0),
             "modality": modality, "surface": surface,
             # 8.7's question - which harness costs what - answered from the warehouse: the
             # chat service labels its brain on every call, the UI's own stream is "ui".
@@ -252,6 +254,7 @@ def version():
             "generator_model": settings.generator_model,
             "prompt": f"{settings.prompt_id}@{settings.prompt_version}",
             "retrieval_mode": settings.retrieval_mode,
+            "retrieval_graph": settings.retrieval_graph,   # 4.6's graph: off | on | auto (13 September 2026)
             # 12 September 2026: the embedding the query vector comes from - the same pair the worker stamps on
             # every row - and whether the ledger's pre-filter is on. A reindex that "changed nothing" and a
             # retrieval that "got worse" both start here.
@@ -338,6 +341,7 @@ def query(req: QueryRequest, user=Depends(verify_iap)):
         hit = _semantic_hit(req, qvec, fingerprint)
         chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec)
     stages["pool"] = len(chunks)                          # what the reranker sees: TOP_K_RETRIEVE, as served
+    stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")   # 4.6's walk, counted
     if hit:
         ans = hit                                         # served from answer_cache: no reranker, no model
         stages["rerank_ms"] = stages["generate_ms"] = 0
@@ -392,6 +396,7 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
         hit = _semantic_hit(req, qvec, fingerprint)      # the stream reads the answer cache; only /v1/query fills it
         chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec)
         stages["retrieve_ms"], stages["pool"] = _ms(tick), len(chunks)
+        stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")
         tick = time.perf_counter()
         if chunks:                                   # a hit brought none; an empty pool has nothing to rank
             chunks = rerank(req.query, chunks, req.top_k, tenant_id=req.tenant_id)

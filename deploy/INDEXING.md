@@ -34,8 +34,13 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    whose status is `queued` is acked as `queued_batch` (the batch lane holds it, step 3); any other refusal is a
    duplicate, acked.
 3. **Parse, scan, chunk.** A PDF is counted by pypdf *before* Doc AI sees it; over `MAX_INLINE_PAGES` (250) it
-   goes to the batch lane - `ingest_batch/{doc_key}` written, the claim set to `queued`, `ingest_queued_batch`
-   logged - and waits there: **the consumer for `ingest_batch/` is not built** (section 8). Anything else is
+   goes to the batch lane - `ingest_batch/{doc_key}` written with the object, its generation and its type, the
+   claim set to `queued`, `ingest_queued_batch` logged with the consumer named - and is indexed from there by the
+   **batch job** (`batch.py`, 13 September 2026): `documind-ingest-batch`, a Cloud Run job on the same image with
+   no request deadline (`batch.tf`), started by the worker as it queues (`BATCH_JOB`) and hourly regardless, which
+   takes the claim in a transaction (`take_batch`), fetches the bytes *by generation* and runs the same pipeline as
+   step 4 onward (`index_document`, `lane=batch`); `make batch` runs it now, `make queued` lists the queue, and a
+   claim the job fails stays `failed` with its reason (section 8). Anything else is
    counted by the parser. Text is chunked by **section** when it has `## ` headings (a handbook: one chunk per
    clause, the clause code as the locator), otherwise fixed 2,000-character windows with a 200 overlap, cut
    page by page so a window never crosses a form feed (`p7-1`; a mirror's `<!-- -->` provenance header is
@@ -73,8 +78,8 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
 | `sources/` | `indexed` | `record_source` | the current version is live | a re-issue (a new `doc_key`, still `indexed`), `make retire`, the object leaving the bucket |
 | `sources/` | `retired` | the nightly walk; `make restore` | the object left the bucket; its rows are flagged and expiring | the object back in the bucket: the next walk plans a reingest |
 | `sources/` | `withdrawn` | `make retire` | a person took it down; the object is **kept**; its rows are flagged and expiring | `make restore` only - never the walk (*withdrawn, object kept*), never a redelivery, never the same bytes again (`ingest_withdrawn`) |
-| `documents/` | `processing` | `claim` | a worker holds this version | `finish`, `release`, or the batch hand-off |
-| `documents/` | `queued` | the batch hand-off | over `MAX_INLINE_PAGES`; waiting for a consumer that is not built | nothing yet; the walk reports it and moves on |
+| `documents/` | `processing` | `claim`, `take_batch` | a worker, or the batch job, holds this version | `finish`, `release`, or the batch hand-off |
+| `documents/` | `queued` | the batch hand-off | over `MAX_INLINE_PAGES`; waiting for the batch job | `take_batch` (`processing`) when the job runs - started by the worker, hourly, or `make batch`; the walk reports it and moves on |
 | `documents/` | `indexed` | `finish`, `reactivate` | the version is current | the swap (`superseded`) |
 | `documents/` | `superseded` | the swap, `make retire`, the walk | retired at `retired_at`; the undo window runs from it | `reactivate` (`indexed`), or a retaken claim after a refused undo (`processing`) |
 | `documents/` | `failed` | `release` | the error is on the row | the next delivery's claim |
@@ -129,7 +134,8 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
 | A document withdrawn on purpose | `make retire SOURCE=` | `reconcile_withdrawn`: the ledger row `withdrawn`, the object kept, the rows expiring after `RETENTION_DAYS`; every night the plan says *withdrawn, object kept* and does nothing; the same bytes again are `ingest_withdrawn` |
 | A document deleted from the bucket | delete the object | retired by the night's walk (`reconcile_retired`, the row `retired`); put the object back and the next walk re-ingests it |
 | Bring a withdrawn document back | `make restore SOURCE=` | `reconcile_restored`, then `ingest_reactivated` inside the undo window or `ingest_ok` after it; refused with the reason when the source is not withdrawn or its object is gone |
-| A document over 250 pages | nothing - it is queued | `ingest_queued_batch`, the plan's `queued` line every night, not drift; **no consumer is built**: split the document, or raise `MAX_INLINE_PAGES` on a worker with a longer ack deadline |
+| A document over 250 pages | nothing - it is queued and the batch job indexes it (`make batch` to run the job now, `make queued` to see the queue; `make batch-job` once, to declare it) | `ingest_queued_batch` with the consumer named, then the job's `ingest_ok` with `lane=batch` and the record in `ingest_batch/` (`indexed`, or `failed` with the reason); the plan's `queued` line until then, not drift |
+| The graph after a reindex | `make graph TENANT=` | `graph_built` with nodes and edges; only chunks whose `chunk_hash` changed are re-extracted (`graph_extractions/`), the rest is cached |
 | Many documents changed | `make ingest-corpus`, `make reconcile APPLY=1` | per-source counts; `reconcile_done` with `drift` 0 the night after |
 | Which version is live? | `make sources TENANT_ONLY=acme`, the UI's Documents page, `GET /v1/sources?tenant_id=` | every source's version, generation, counts, dates, the fingerprint |
 | Is the cache current? | `make cache CACHE_OP=show` | *current*, or *STALE* with both fingerprints |
@@ -146,8 +152,9 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
   the TTL field, the job, the metrics, the Makefile and the deploy scripts.
 - **Lifecycle** (`tools/check_lifecycle.py`): the tombstone (a withdrawn source is never re-ingested by the plan,
   never reactivated), the verified undo (a shortfall and a closed window refuse, flip nothing, log both numbers),
-  the batch claim left `queued` and skipped by the plan, `tenant_id` on the claim, the `doc_type` restrict and the
-  re-upsert - against the same fake Firestore.
+  the batch claim left `queued` and skipped by the plan, the job's take and run (`take_batch`, `batch.py`: by
+  generation, the worker's own pipeline, a gone generation and a failed document recorded), `tenant_id` on the
+  claim, the `doc_type` restrict and the re-upsert - against the same fake Firestore.
 - **Live, on a candidate** (`make eval-live SOURCE=`): the rows that cite the document; a version row that cites a
   retired figure blocks on its own; a threshold with no rows in scope is reported, not judged.
 - **Smoke** (`make smoke-reindex`): the lifecycle end to end on a three-chunk fixture.
@@ -159,9 +166,17 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
 - No versions inside the shared `Citation` contract (decision D5): the version rides on the row, the header,
   the stream and the UI.
 - No second ingestion path for updates: the reconcile re-ingests by rewriting the object onto itself.
-- No consumer for the batch lane: `_enqueue_batch()` writes `ingest_batch/{doc_key}` and leaves the claim `queued`,
-  and nothing polls it. A document over 250 pages waits, visibly (`ingest_queued_batch`, the nightly plan's
-  `queued` line, `documents/` says so), until one is built.
+- The batch lane's consumer is a job, not a second service (13 September 2026): `documind-ingest-batch` runs
+  `batch.py` on the ingest image with no request deadline, started by the worker as it queues a document
+  (`BATCH_JOB`, `_run_batch_job`) and hourly at :15 regardless (`batch.tf`, behind `BATCH_JOB=true` like the
+  reconcile job). It takes each queued claim in a transaction, fetches the bytes by generation and runs the
+  worker's own `index_document()`; two runs never index one document twice. A document it fails stays `failed`
+  with its reason, and the job never retakes it: `make reindex`, or the same bytes uploaded again, is the way back.
+- The graph (4.6) is built by hand, not by the worker: `make graph TENANT=` extracts over the tenant's current
+  chunks (cached by `chunk_hash`, so a re-issued document costs its changed chunks only) and loads `graph_nodes` /
+  `graph_edges` with the lesson's own `FirestoreGraph` (`shared/documind_graph.py`). A version swap leaves a node's
+  `chunk_ids` pointing at retired rows until the next `make graph`; the retriever drops those the way it drops every
+  retired chunk (`prefer_current`, the `current` check), so a stale graph loses coverage, never correctness.
 - Not yet (the strategy's P2): `make reembed EMBEDDING_VERSION=` (a full re-embed into new rows behind a
   candidate), an index per embedding version on the full profile, an as-of filter on `effective_to`.
 

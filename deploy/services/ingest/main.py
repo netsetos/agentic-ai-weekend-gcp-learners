@@ -36,6 +36,11 @@ _gcs = storage.Client()
 INDEX_NAME = os.environ.get("VECTOR_INDEX_NAME", "")
 PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 PROCESSOR_ID = os.environ.get("DOCAI_PROCESSOR_ID", "")    # docai.tf outputs it
+REGION = os.environ.get("REGION", "us-central1")
+# The batch lane's consumer (13 September 2026): the Cloud Run JOB batch.tf declares on this image, named here once
+# make batch-job has declared it. Empty: nothing is started when a document is queued, and the queue waits for
+# make batch (gcloud run jobs execute) - the lane says so on the ingest_queued_batch line.
+BATCH_JOB = os.environ.get("BATCH_JOB", "")
 GEN_MODEL = os.environ.get("GEN_MODEL", "gemini-3.6-flash")
 # The SQL lane (5.5, gap G9): PROJECT.rag_data.chunk_source, declared by dataplex.tf. Unset
 # means the lane is off; the worker never needs BigQuery to index a document.
@@ -65,8 +70,9 @@ if not os.environ.get("AUDIT_BUCKET"):
         "dlp.finding events; refusing to start without somewhere to put them.")
 # parser.py sends a PDF to Document AI in 15-page slices at roughly a second a page, and the
 # push subscription allows 600 seconds before it redelivers, so a document this size finishes
-# inline with room to spare. Bigger than this goes to the batch lane - a claim document that
-# nothing polls yet: the largest file in the kit's corpus is under two hundred pages.
+# inline with room to spare. Bigger than this goes to the batch lane - a claim document the batch job consumes
+# (batch.py, batch.tf: no request deadline, the same pipeline as below, 13 September 2026); the largest file in
+# the kit's corpus is under two hundred pages, so the corpus never takes it.
 MAX_INLINE_PAGES = 250
 
 # 4.1's chunker, the shape every lesson's corpus has: ~500 tokens per chunk, an
@@ -228,23 +234,52 @@ def _describe_media(gcs_uri: str, content_type: str) -> list[dict]:
              "chunk_hash": chunk_hash(s.summary)} for s in (r.parsed or [])]
 
 
-def _enqueue_batch(doc: DocumentContract, generation: str) -> None:
-    """The batch lane. A claim document a batch worker would poll; no second queue to provision.
+class IngestFailed(Exception):
+    """index_document() gave the claim back and logged ingest_failed; the caller decides what a failure is on its
+    lane - a 500 on the push path (Pub/Sub retries, then the DLQ), a failed record on the batch path."""
 
-    Nothing polls it yet (12 September 2026): no consumer for ingest_batch/ is built, so the document WAITS, and
-    its claim says so - `queued`, not `processing` - which is what keeps a redelivery from being acked as a
-    duplicate and the nightly reconcile from rewriting the object onto itself every night: the worker answers
+
+def _run_batch_job() -> str:
+    """Start the batch job (batch.tf: documind-ingest-batch) once, through the Cloud Run Jobs API, as this worker's
+    own identity - batch.tf grants it run.invoker on the job. A failure here is logged and swallowed by the caller:
+    the hourly schedule and make batch drain the same queue, and a document that is queued is not a failed ingest."""
+    import google.auth
+    from google.auth.transport.requests import AuthorizedSession
+    creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    url = f"https://run.googleapis.com/v2/projects/{PROJECT}/locations/{REGION}/jobs/{BATCH_JOB}:run"
+    r = AuthorizedSession(creds).post(url, json={}, timeout=30)
+    r.raise_for_status()
+    return (r.json().get("metadata") or {}).get("name", "")
+
+
+def _enqueue_batch(doc: DocumentContract, msg: IngestMessage) -> None:
+    """The batch lane. A claim document the batch job consumes; no second queue to provision.
+
+    The document WAITS, and its claim says so - `queued`, not `processing` - which is what keeps a redelivery from
+    being acked as a duplicate and the nightly reconcile from rewriting the object onto itself: the worker answers
     queued_batch, reconcile's plan reports `queued` for that generation and counts it apart from the drift. The
-    log line says the same, at warning, so the wait is visible and not a silent hole in the corpus."""
+    record carries everything the consumer needs to fetch the same bytes (the object, its generation, its type),
+    and when the job is declared (BATCH_JOB, batch.tf) it is started here, so a queued document is indexed minutes
+    later and not at the next hour. The log line says which (13 September 2026)."""
     _db.collection("ingest_batch").document(doc.doc_key).set({
-        "tenant_id": doc.tenant_id, "gcs_uri": doc.gcs_uri, "pages": doc.pages, "generation": str(generation),
+        "tenant_id": doc.tenant_id, "gcs_uri": doc.gcs_uri, "bucket": msg.bucket, "name": msg.name,
+        "content_type": msg.content_type, "size": msg.size, "pages": doc.pages, "generation": str(msg.generation),
         "status": "queued", "queued_at": firestore.SERVER_TIMESTAMP})
     _db.collection("documents").document(doc.doc_key).set(
-        {"status": "queued", "pages": doc.pages, "generation": str(generation),
+        {"status": "queued", "pages": doc.pages, "generation": str(msg.generation),
          "queued_at": firestore.SERVER_TIMESTAMP}, merge=True)
+    consumer = "no job declared (BATCH_JOB unset): make batch runs the queue now, make batch-job declares and schedules it"
+    if BATCH_JOB:
+        try:
+            op = _run_batch_job()
+            consumer = f"{BATCH_JOB} started ({op or 'run requested'}); the hourly schedule backstops it"
+        except Exception as e:  # noqa: BLE001 - the queue is durable; the schedule and make batch drain it
+            consumer = f"{BATCH_JOB} could not be started ({type(e).__name__}); the hourly schedule drains the queue"
+            log.warning(json.dumps({"event": "batch_job_start_failed", "tenant": doc.tenant_id, "doc_key": doc.doc_key,
+                                    "job": BATCH_JOB, "error": f"{type(e).__name__}: {e}"[:300]}))
     log.warning(json.dumps({"event": "ingest_queued_batch", "tenant": doc.tenant_id, "doc_key": doc.doc_key,
-                            "gcs_uri": doc.gcs_uri, "pages": doc.pages, "generation": str(generation),
-                            "note": "no consumer for ingest_batch/ is built: the document waits, its claim says queued"}))
+                            "gcs_uri": doc.gcs_uri, "pages": doc.pages, "generation": str(msg.generation),
+                            "consumer": consumer}))
 
 
 @app.post("/")
@@ -320,7 +355,7 @@ async def push(request: Request):
             if not claim(_db, doc.doc_key, doc.gcs_uri, doc.tenant_id, retake=True):
                 return {"status": "duplicate", "doc_key": doc.doc_key}
         elif status_of(_db, doc.doc_key) == "queued":
-            # Handed to the batch lane by an earlier delivery and still waiting there (no consumer is built):
+            # Handed to the batch lane by an earlier delivery and waiting for the batch job (batch.py) to take it:
             # acked as queued, so the wait is a fact in the log and not a "duplicate" that hides it.
             return {"status": "queued_batch", "doc_key": doc.doc_key}
         else:
@@ -351,6 +386,19 @@ async def push(request: Request):
                              "seeded_by": prior.get("generation") or "unknown"}))
         return {"status": "already_current", "doc_key": doc.doc_key, "chunks": already}
 
+    try:
+        return index_document(doc, msg, content)
+    except IngestFailed:
+        raise HTTPException(500, "ingest failed")
+
+
+def index_document(doc: DocumentContract, msg: IngestMessage, content: bytes, lane: str = "push") -> dict:
+    """The pipeline, from a claimed document to its record: media described or text parsed, chunked, DLP-scanned,
+    the carry-over, the staged write, the swap, the claim, the ledger row, the fingerprint, one ingest_ok line.
+    Shared by the two lanes (13 September 2026): the push handler above, inside a request's 600 s, and batch.py,
+    a job with no deadline, which passes lane="batch" so the page ceiling that queued the document is not asked
+    again. A failure gives the claim back (release), logs ingest_failed and raises IngestFailed; each lane decides
+    what that means for it."""
     gone = {"activated": 0, "retired_doc_keys": [], "retired_ids": [], "retired_chunks": 0}
     counts = {"reused": 0, "embedded": 0}
     try:
@@ -373,17 +421,17 @@ async def push(request: Request):
             # the first version parsed the whole file and then looked at the count. Anything that is not a
             # PDF is counted by the parser, as before.
             pages = _pdf_pages(content) if msg.content_type == "application/pdf" else None
-            if pages is not None and pages > MAX_INLINE_PAGES:
+            if lane == "push" and pages is not None and pages > MAX_INLINE_PAGES:
                 doc = doc.model_copy(update={"pages": pages, "effective_from": effective_from_of(msg.name, None)})
-                _enqueue_batch(doc, msg.generation)
+                _enqueue_batch(doc, msg)
                 return {"status": "queued_batch", "pages": pages}
             text, pages = _parse(content, msg.content_type)
             doc = doc.model_copy(update={"pages": pages,
                                         "effective_from": effective_from_of(msg.name, text)})
-            if pages > MAX_INLINE_PAGES:
+            if lane == "push" and pages > MAX_INLINE_PAGES:
                 # A 400-page contract will not finish inside a push request's
                 # timeout. Hand it to the batch lane and ack.
-                _enqueue_batch(doc, msg.generation)
+                _enqueue_batch(doc, msg)
                 return {"status": "queued_batch", "pages": pages}
             chunks = _chunk(text)
 
@@ -463,12 +511,12 @@ async def push(request: Request):
         # line an operator reads first: the claim document carries the same text, but
         # the first live load was diagnosed from request logs that only said 500.
         release(_db, doc.doc_key, f"{type(e).__name__}: {e}")
-        log.error(json.dumps({"event": "ingest_failed", "tenant": doc.tenant_id,
+        log.error(json.dumps({"event": "ingest_failed", "tenant": doc.tenant_id, "lane": lane,
                               "doc_key": doc.doc_key, "gcs_uri": doc.gcs_uri,
                               "error": f"{type(e).__name__}: {e}"[:600]}))
-        raise HTTPException(500, "ingest failed")
+        raise IngestFailed(f"{type(e).__name__}: {e}") from e
 
-    log.info(json.dumps({"event": "ingest_ok", "tenant": doc.tenant_id,
+    log.info(json.dumps({"event": "ingest_ok", "tenant": doc.tenant_id, "lane": lane,
                          "doc_key": doc.doc_key, "chunks": len(chunks),
                          "pages": pages, "kinds": sorted({c["kind"] for c in chunks}),
                          "reused": counts["reused"], "embedded": counts["embedded"],

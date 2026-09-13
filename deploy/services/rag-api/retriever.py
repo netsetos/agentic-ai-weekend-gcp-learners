@@ -9,6 +9,7 @@ from google import genai
 from google.genai import types
 from google.cloud import firestore
 from config import settings
+from shared.documind_graph import FirestoreGraph, choose_mode   # 4.6's store, the lane's copy (13 September 2026)
 
 @lru_cache(maxsize=1)
 def _genai_client():
@@ -93,8 +94,10 @@ def prefer_current(chunks: list[dict]) -> list[dict]:
     Then one version per source: the newest-per-source guard closes the swap window on its own."""
     return newest_per_source([c for c in chunks if c.get("current") is not False])
 
-def retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
-             vec: list[float] | None = None) -> list[dict]:
+def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
+                    vec: list[float] | None = None) -> list[dict]:
+    """The dense pool: Vector Search (dense or hybrid) with the Firestore fallback beneath it, or Firestore's own
+    vector index on the lean profile - the same tenant / current / filter predicates on every path."""
     vec = vec if vec is not None else embed_query(query)    # main.py embeds once: the answer cache looked it up first
     if settings.retrieval_backend == "firestore":
         # The lean profile (deploy/README.md): no Vector Search endpoint exists, on purpose.
@@ -146,6 +149,55 @@ def retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None
     # (TOP_K_RETRIEVE, the knob the ablation moves) is two - never one query
     # over the limit, which Firestore refuses rather than truncates.
     return prefer_current(_hydrate(ids[:settings.top_k_retrieve], scores))
+
+
+def graph_candidates(query: str, tenant_id: str, filters: dict | None = None) -> list[dict]:
+    """4.6's graph, on the lane (13 September 2026): the chunks the tenant's knowledge graph points at for this question.
+
+    RETRIEVAL_GRAPH=off returns nothing and touches nothing. `on` walks for every question; `auto` walks only when the
+    question is relational and a seed entity is found (shared/documind_graph.choose_mode - no model call). The walk is
+    the notebook's own class (FirestoreGraph: seed by containment, expand one or two hops, capped) and it is
+    tenant-scoped in every read; the chunk ids it hands over are fetched from the one chunks collection and checked
+    once more - the tenant, the caller's filters, the ledger's current - the same predicates every other path applies.
+    A tenant with no graph, or a question with no seed, is an empty list: dense retrieval answers as before."""
+    mode = settings.retrieval_graph
+    if mode == "off":
+        return []
+    g = FirestoreGraph(_fs())
+    seeds = g.seed(query, tenant_id)
+    if not seeds or (mode == "auto" and choose_mode(query, seeds) != "graph"):
+        return []
+    nodes = g.expand([s["node_id"] for s in seeds], tenant_id, hops=settings.graph_hops, cap=settings.graph_cap)
+    out = []
+    for cid in sorted({c for n in nodes for c in n["chunk_ids"]}):
+        snap = _fs().collection(settings.chunks_collection).document(cid).get()
+        if not snap.exists:
+            continue
+        d = snap.to_dict() or {}
+        if d.get("tenant_id") != tenant_id:            # the walk is tenant-scoped; the id it hands over is checked once more
+            continue
+        if any(d.get(k) != v for k, v in (filters or {}).items()):   # doc_type, kind: the same predicates as every path
+            continue
+        if settings.retrieval_current_only == "on" and d.get("current") is not True:
+            continue
+        d["id"] = cid
+        d["score"] = 1.0                               # fetched by id: an exact hit, ahead of the dense pool
+        d["found_by"] = "graph"
+        d.pop("embedding", None)
+        out.append(d)
+    return out
+
+
+def retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
+             vec: list[float] | None = None) -> list[dict]:
+    """The pool the reranker sees: the graph's chunks first, when RETRIEVAL_GRAPH says so, then the dense candidates
+    that are not already in it, cut to TOP_K_RETRIEVE; a retired version never survives either half."""
+    graph = graph_candidates(query, tenant_id, filters)
+    dense = _dense_retrieve(query, tenant_id, top_k, filters, vec=vec)
+    if not graph:
+        return dense
+    seen = {c["id"] for c in graph}
+    return prefer_current(graph + [c for c in dense if c["id"] not in seen])[:settings.top_k_retrieve]
 
 
 def _hydrate(ids: list[str], scores: dict) -> list[dict]:
