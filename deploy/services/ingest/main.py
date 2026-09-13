@@ -22,8 +22,8 @@ from shared.pii import inspect_image as pii_inspect_image, inspect_many as pii_i
 from shared.audit_log import emit as audit_emit
 
 from contracts import IngestMessage, DocumentContract, chunk_hash, effective_from_of, sha256_of
-from idempotency import (claim, finish, reactivate, record_source, refresh_fingerprint, release,
-                         retire_previous, stale_generation, status_of, swap_versions, withdrawn)
+from idempotency import (claim, current_chunks, finish, reactivate, record_source, refresh_fingerprint, release,
+                         retire_previous, source_id_for, stale_generation, status_of, swap_versions, withdrawn)
 from indexer import (EMBEDDING_MODEL, EMBEDDING_VERSION, embed_with_carry_over, mirror_to_bigquery,
                      mirror_to_firestore, remove_datapoints, reupsert, to_datapoints, upsert)
 from parser import parse
@@ -328,6 +328,28 @@ async def push(request: Request):
             # same bytes. Returning 200 ACKS the message: this is a success, not a
             # failure, and retrying it would achieve nothing.
             return {"status": "duplicate", "doc_key": doc.doc_key}
+
+    # THE OTHER LANE'S VERSION (13 September 2026). The Module 4 notebooks seed this collection through
+    # shared/documind_corpus.py - the same doc_key for the same bytes (a real Act's is its PDF's sha, not its
+    # mirror's), the same ledger row - and never the claim, so the claim above is won for a version that is
+    # already current. Nothing is parsed or embedded: the claim becomes its record with the rows it holds, the
+    # ledger learns this generation (so the nightly walk stops planning a re-ingest), the fingerprint is
+    # refreshed, and the line says what was found. The other order needs nothing: seed() skips a version the
+    # lane already holds current.
+    already = current_chunks(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key, EMBEDDING_MODEL, EMBEDDING_VERSION)
+    if already:
+        prior = _db.collection("sources").document(source_id_for(doc.tenant_id, msg.name)).get()
+        prior = (prior.to_dict() or {}) if prior.exists else {}
+        finish(_db, doc.doc_key, already, {"reused": already, "embedded": 0}, msg.generation)
+        record_source(_db, doc.tenant_id, msg.name, doc.gcs_uri, doc.doc_key, msg.generation, doc.sha256, already,
+                      prior.get("effective_from"), reused=already, embedded=0, retired=0,
+                      embedding_model=EMBEDDING_MODEL, embedding_version=EMBEDDING_VERSION)
+        fingerprint = refresh_fingerprint(_db, doc.tenant_id, "ingest_already_current")
+        log.info(json.dumps({"event": "ingest_already_current", "tenant": doc.tenant_id, "doc_key": doc.doc_key,
+                             "gcs_uri": doc.gcs_uri, "generation": msg.generation, "chunks": already,
+                             "reused": already, "embedded": 0, "retired": 0, "fingerprint": fingerprint,
+                             "seeded_by": prior.get("generation") or "unknown"}))
+        return {"status": "already_current", "doc_key": doc.doc_key, "chunks": already}
 
     gone = {"activated": 0, "retired_doc_keys": [], "retired_ids": [], "retired_chunks": 0}
     counts = {"reused": 0, "embedded": 0}

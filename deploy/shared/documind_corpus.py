@@ -62,7 +62,9 @@ def load_documents(tenant: str, evals_dir: str, project_id: str) -> list:
     """Every document of one tenant that has text on disk: the synthetic .md files and the real
     Acts' pypdf mirrors. A scanned PDF with no mirror (posh_act_2013) is skipped - that one is
     lesson 4.1's, and only Document AI can read it. Each carries its VERSION - the sha256 of the
-    mirror's bytes, the worker's doc_key for the same bytes - and the date it declares, if any."""
+    OBJECT the lane ingests (the .md itself; for a real Act the PDF, never its mirror), which is
+    the worker's doc_key for the same bytes, so a notebook and the lane name one version of one
+    document (13 September 2026) - and the date it declares, if any."""
     docs = []
     for m in json.load(open(os.path.join(evals_dir, "manifest.json"), encoding="utf-8")):
         if m["tenant_id"] != tenant or not m.get("chars"):
@@ -73,9 +75,13 @@ def load_documents(tenant: str, evals_dir: str, project_id: str) -> list:
         raw = open(mirror, "rb").read()
         text = raw.decode("utf-8")
         dated = _EFFECTIVE.search(text[:3000])
+        obj = os.path.join(evals_dir, m["file"])           # what the worker would hash: the PDF beside its mirror, or the .md
+        version = (hashlib.sha256(open(obj, "rb").read()).hexdigest() if os.path.isfile(obj)
+                   else m.get("sha256") or hashlib.sha256(raw).hexdigest())
         docs.append({"slug": m["slug"], "doc_type": m["doc_type"],
                      "source_uri": m["gcs_uri"].replace("${PROJECT_ID}", project_id),
-                     "text": text, "sha256": hashlib.sha256(raw).hexdigest(),
+                     "text": text, "sha256": version,
+                     "mirror_sha256": hashlib.sha256(raw).hexdigest(),   # provenance: which mirror text was chunked
                      "effective_from": dated.group(1) if dated else None})
     return docs
 

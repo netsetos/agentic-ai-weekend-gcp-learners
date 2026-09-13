@@ -111,6 +111,30 @@ def _doc_key_of(snap) -> str:
     return d.get("doc_key") or snap.id.split("#")[0].replace(":", "_", 1)
 
 
+def current_chunks(db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: str,
+                   embedding_model: str | None = None, embedding_version: str | None = None) -> int:
+    """How many rows of `doc_key` are current for this source - made with the named embedding, when one is named.
+
+    The other lane's version (13 September 2026). The Module 4 notebooks seed the same collection through
+    shared/documind_corpus.py: the same doc_key for the same bytes (a real Act's is its PDF's sha, not its
+    mirror's) and the same ledger row - but never the claim, so the worker wins claim() for a version that is
+    already here. The handler asks this before it parses anything: a version that is current is done. A row
+    without the embedding stamp, or with another embedding, does not count - it could not serve this worker's
+    queries - and the ingest proceeds as a fresh version whose carry-over reuses nothing from it."""
+    n = 0
+    query = (db.collection("chunks").where("tenant_id", "==", tenant_id)
+             .where("source_uri", "==", gcs_uri).where("current", "==", True))
+    for snap in query.stream():
+        if _doc_key_of(snap) != doc_key:
+            continue
+        d = snap.to_dict() or {}
+        if embedding_model and (d.get("embedding_model") != embedding_model
+                                or str(d.get("embedding_version")) != str(embedding_version)):
+            continue
+        n += 1
+    return n
+
+
 def stale_generation(db: firestore.Client, tenant_id: str, name: str, generation) -> str | None:
     """The generation guard. Returns the ledger's generation when this event's is OLDER than it - a late redelivery
     the worker must ignore - and None when the event is as new as the ledger or newer, or the ledger has no row."""
