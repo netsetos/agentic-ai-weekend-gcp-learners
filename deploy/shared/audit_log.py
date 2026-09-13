@@ -22,6 +22,9 @@ AUDIT_ACTIONS = {
     # 9.4's Media Studio (gap G8): emit() refuses an unregistered action on purpose, so
     # adopting services/rag-api/media.py meant adding these names FIRST.
     "media.generate", "media.transcribe",
+    # The managed mirror (services/ingest/managed.py, 13 September 2026 evening): a copy of a tenant's
+    # text went into, or left, a store outside the kit - the store, its region, the doc_key, the op.
+    "doc.mirror",
 }
 
 _bucket = None

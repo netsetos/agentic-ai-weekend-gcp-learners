@@ -249,11 +249,20 @@ front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto`
 `MANAGED_MIRROR=rag_engine|vertex_search|both` copies every version the worker swaps current, as the text its rows
 hold, into the tenant's RAG Engine corpus (`make rag-engine-enable` once, `make rag-corpus TENANT=` per tenant)
 and / or Vertex AI Search data store (`managed.tf`, `MANAGED_SEARCH=true`), and takes a retired version out;
-`make managed-status` reads every store against the ledger. Off on the lane and refused unless `RESIDENCY=us`.
+`make managed-status` reads every store against the ledger. Off on the lane. Which *tenants* are mirrored is each
+tenant's `data_region` policy (13 September 2026, evening: `tenant_settings/{tenant}`, `make tenant-policy TENANT=
+DATA_REGION=in|any`, `shared/tenancy.py`; absent is `in`): `make roster` sets `acme` and `zeta` to `any` and
+`globex` to `in`, so one deployment shows both - a forbidden store is skipped once per tenant and said so, a
+delete is never refused, every copy in or out is a `doc.mirror` audit event, and `GET /v1/sources` says where
+each version is held (`mirrored`).
 The API reads the corpus as `RETRIEVAL_BACKEND=rag_engine` (P9.4): the tenant's corpus queried by text, each
 context mapped to the kit's chunk contract through its version's row, the same reranker, packing and citations,
 figures and segments still from the kit's index, and the Firestore rung with the filters when a tenant has no
-corpus or the store will not answer (`rag_engine_fallback`). `make ablate ABLATE_ARGS="--arms all"` measures it
+corpus or the store will not answer (`rag_engine_fallback`). `RETRIEVAL_BACKEND` is the deployment's default: a
+tenant's `tenant_settings.retrieval_backend` pins its store, and its `data_region` decides whether a managed store
+may serve it at all - a managed backend for an `in` tenant is the kit's own index with `policy_fallback=1` on the
+usage row (never the store, never a 500), and the row's `retrieval_backend` is the one that served. `make ablate
+ABLATE_ARGS="--arms all"` measures it
 from outside the API; `make candidate RETRIEVAL_BACKEND=rag_engine` judges it. The data store's backend is next.
 
 ---

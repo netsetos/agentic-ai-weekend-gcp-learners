@@ -11,8 +11,9 @@ from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
 from schemas import QueryRequest, RAGResponse, RAGAnswer, FILTER_KEYS
 from retriever import retrieve, rerank, rerank_fell_back, _fs, embed_query
 from generator import generate, generate_stream, _client as _gen_client
-from config import settings
+from config import settings, RETRIEVAL_BACKENDS, MANAGED_BACKENDS
 from auth import verify_iap, enforce_membership
+from shared.tenancy import policy_of              # the tenant's data_region, one normalisation (13 September 2026, evening)
 from cost import price
 from router import classify
 from breakers import choose_model
@@ -101,8 +102,10 @@ _TENANT_SETTINGS: dict = {}
 
 def tenant_settings(tenant_id: str) -> dict:
     """11.4's "pin one tenant": tenant_settings/{tenant} may name a model_backend and a generator_model, and the
-    residency customer's answers come from the self-hosted route while everyone else's come from Gemini. Read once a
-    minute per tenant; a missing document or a failed read is the global setting. A field edit, never a redeploy."""
+    residency customer's answers come from the self-hosted route while everyone else's come from Gemini. Since
+    13 September 2026 (evening) the same document may pin a retrieval_backend and declares data_region - where the
+    tenant's text may be held (shared/tenancy.py; `in` unless it says `any`). Read once a minute per tenant; a
+    missing document or a failed read is the global setting (and the strict policy). A field edit, never a redeploy."""
     now = time.time()
     hit = _TENANT_SETTINGS.get(tenant_id)
     if hit and now - hit[0] < 60:
@@ -116,13 +119,35 @@ def tenant_settings(tenant_id: str) -> dict:
     return doc
 
 
-def choose_for(req) -> tuple[str, str]:
-    """(backend, model) for this request: the tenant's pin first, else the routed tier (10.3), else the settings."""
+def choose_for(req) -> tuple[str, str, str]:
+    """(model backend, model, retrieval backend) for this request: the tenant's pins first, else the routed tier (10.3)
+    and the settings. A pinned retrieval_backend the deployment cannot serve - an unknown name, or a managed store
+    under RETRIEVAL_MODE=hybrid (the pair config.py refuses at startup) - is ignored with a line, never a 500."""
     ts = tenant_settings(req.tenant_id)
     backend = ts.get("model_backend") or settings.model_backend
-    if ts.get("generator_model"):
-        return backend, ts["generator_model"]
-    return backend, choose_model_for(req.query)
+    model = ts["generator_model"] if ts.get("generator_model") else choose_model_for(req.query)
+    pin = ts.get("retrieval_backend")
+    retrieval = settings.retrieval_backend
+    if pin and pin != retrieval:
+        if pin in RETRIEVAL_BACKENDS and not (pin in MANAGED_BACKENDS and settings.retrieval_mode == "hybrid"):
+            retrieval = pin
+        else:
+            log.warning(json.dumps({"event": "retrieval_pin_ignored", "tenant": req.tenant_id, "retrieval_backend": pin,
+                                    "served": retrieval, "why": f"one of {'|'.join(RETRIEVAL_BACKENDS)}, and a managed store cannot fuse hybrid"}))
+    return backend, model, retrieval
+
+
+def retrieval_backend_for(tenant_id: str, backend: str) -> tuple[str, int]:
+    """The backend that will serve, held against the tenant's data_region (13 September 2026, evening): a managed
+    store (config.MANAGED_BACKENDS) for a tenant whose text may not leave India - `in`, which an absent policy also
+    means - is the kit's own index instead, with policy_fallback=1 on the row: the deployment's own backend when
+    that is one (vector, firestore), else Firestore, which holds every embedding the worker wrote. Never the store,
+    never a 500; the row says it happened, so a day of fallbacks is a count."""
+    ts = tenant_settings(tenant_id)
+    if backend in MANAGED_BACKENDS and policy_of(ts) != "any":
+        own = settings.retrieval_backend if settings.retrieval_backend not in MANAGED_BACKENDS else "firestore"
+        return own, 1
+    return backend, 0
 
 
 def _fingerprint(tenant_id: str) -> str:
@@ -199,7 +224,7 @@ def empty_pool_answer(model: str, stages: dict) -> RAGResponse:
 
 def usage_row(req, user, ans_tokens_in, ans_tokens_out, cached, latency_ms,
               answerable, confidence, surface, modality="text", model=None, backend=None, cost_usd=None, guard="off",
-              stages=None):
+              stages=None, retrieval_backend=None):
     """The ONE shape every observability consumer reads.
 
     tenant_daily.sql selects exactly these fields, so a column added there
@@ -236,8 +261,11 @@ def usage_row(req, user, ans_tokens_in, ans_tokens_out, cached, latency_ms,
             "retrieval_mode": settings.retrieval_mode,
             # 4.6's graph on the lane (13 September 2026): the switch, and how many of the pool's chunks the walk put there
             "retrieval_graph": settings.retrieval_graph, "graph_chunks": stages.get("graph_chunks", 0),
-            # P9.4: which store served the pool, and how many of its chunks a managed store put there (the rest fell back)
-            "retrieval_backend": settings.retrieval_backend, "managed_chunks": stages.get("managed_chunks", 0),
+            # P9.4: which store served the pool - the EFFECTIVE one (the tenant's pin, or the kit's index after the
+            # policy fallback; the setting when the handler passed none), how many of its chunks a managed store put
+            # there (the rest fell back), and 1 when the tenant's data_region sent a managed backend to the kit's index
+            "retrieval_backend": retrieval_backend or settings.retrieval_backend, "managed_chunks": stages.get("managed_chunks", 0),
+            "policy_fallback": stages.get("policy_fallback", 0),
             "modality": modality, "surface": surface,
             # 8.7's question - which harness costs what - answered from the warehouse: the
             # chat service labels its brain on every call, the UI's own stream is "ui".
@@ -256,7 +284,7 @@ def version():
             "generator_model": settings.generator_model,
             "prompt": f"{settings.prompt_id}@{settings.prompt_version}",
             "retrieval_mode": settings.retrieval_mode,
-            "retrieval_backend": settings.retrieval_backend,   # vector | firestore | rag_engine (P9.4): where the pool comes from
+            "retrieval_backend": settings.retrieval_backend,   # vector | firestore | rag_engine (P9.4): the DEFAULT; a tenant's pin and its data_region decide per request (the row's retrieval_backend is the effective one)
             "retrieval_graph": settings.retrieval_graph,   # 4.6's graph: off | on | auto (13 September 2026)
             # 12 September 2026: the embedding the query vector comes from - the same pair the worker stamps on
             # every row - and whether the ledger's pre-filter is on. A reindex that "changed nothing" and a
@@ -272,7 +300,9 @@ def sources(tenant_id: str, user=Depends(verify_iap)):
     generation, what the last reindex cost (chunks reused by hash, embedded, retired), the date it declares, when
     it landed - and the corpus fingerprint the cache is keyed to. Read-only, and only for a tenant the caller is
     on the roster of: one customer's ledger is not another's to read. The UI's Documents page renders it;
-    `make sources TENANT=` prints the same rows from the shell (reconcile.py --report)."""
+    `make sources TENANT=` prints the same rows from the shell (reconcile.py --report). `mirrored` (13 September 2026,
+    evening) is where the version is HELD: the managed stores that confirmed it, with regions; empty is the kit's rows
+    only - beside the tenant's data_region, the policy those copies were judged under."""
     enforce_membership(user["email"], tenant_id)
     fs = _fs()
     rows = []
@@ -284,12 +314,13 @@ def sources(tenant_id: str, user=Depends(verify_iap)):
                      "reused": d.get("reused"), "embedded": d.get("embedded"), "retired": d.get("retired"),
                      "effective_from": d.get("effective_from"),
                      "embedding": f"{d.get('embedding_model') or '?'}@{d.get('embedding_version') or '?'}",
-                     "indexed_at": at.isoformat() if hasattr(at, "isoformat") else None})
+                     "indexed_at": at.isoformat() if hasattr(at, "isoformat") else None,
+                     "mirrored": d.get("mirrored") or {}})
     rows.sort(key=lambda r: r["name"] or "")
     led = fs.collection("ledger").document(tenant_id).get()
     l = (led.to_dict() or {}) if led.exists else {}
     return {"tenant_id": tenant_id, "fingerprint": l.get("fingerprint"), "versions": l.get("versions"),
-            "last_event": l.get("last_event"), "sources": rows}
+            "last_event": l.get("last_event"), "data_region": policy_of(tenant_settings(tenant_id)), "sources": rows}
 
 @app.get("/ready")
 def ready():
@@ -337,14 +368,15 @@ def query(req: QueryRequest, user=Depends(verify_iap)):
     enforce_membership(user["email"], req.tenant_id)
     check_filters(req.filters)                            # a 400 before any work: an unknown key is a typo, not an empty pool
     t0 = time.time()
-    backend, model = choose_for(req)
+    backend, model, rbackend = choose_for(req)
     guard = screen_prompt(req.query, req.tenant_id)       # 12.6: before retrieval, or not at all (ARMOR=off)
     stages: dict = {}
+    rbackend, stages["policy_fallback"] = retrieval_backend_for(req.tenant_id, rbackend)   # the tenant's data_region, per request
     fingerprint = _fingerprint(req.tenant_id) if settings.semantic_cache == "on" else ""
     with stage(stages, "retrieve"):
         qvec = embed_query(req.query)                     # once: the answer cache and the retrieval share it
         hit = _semantic_hit(req, qvec, fingerprint)
-        chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec)
+        chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec, backend=rbackend)
     stages["pool"] = len(chunks)                          # what the reranker sees: TOP_K_RETRIEVE, as served
     stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")   # 4.6's walk, counted
     stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") == "rag_engine")   # P9.4: the store's share of the pool
@@ -370,7 +402,7 @@ def query(req: QueryRequest, user=Depends(verify_iap)):
     row = usage_row(req, user, ans.tokens_in, ans.tokens_out, getattr(ans, "cached_tokens", 0),
                     ans.latency_ms, ans.answerable, ans.confidence, "query",
                     modality=modality_of(c.kind for c in ans.citations), model=ans.model or model,
-                    backend=ans.backend, cost_usd=ans.cost_usd, guard=guard, stages=stages)
+                    backend=ans.backend, cost_usd=ans.cost_usd, guard=guard, stages=stages, retrieval_backend=rbackend)
     log.info(json.dumps(row))
     _record(row["cost_usd"])
     if reason:
@@ -392,15 +424,16 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
     guard = screen_prompt(req.query, req.tenant_id)       # 12.6: before the stream starts, so a block is a 400, not a broken stream
     def sse():
         t0 = time.time()
-        backend, model = choose_for(req)
+        backend, model, rbackend = choose_for(req)
         # The same three clocks as /v1/query, without the spans: a generator suspended between tokens is
         # no place to hold a span's context, and the trace already carries the request's own span.
         stages: dict = {}
+        rbackend, stages["policy_fallback"] = retrieval_backend_for(req.tenant_id, rbackend)
         fingerprint = _fingerprint(req.tenant_id) if settings.semantic_cache == "on" else ""
         tick = time.perf_counter()
         qvec = embed_query(req.query)
         hit = _semantic_hit(req, qvec, fingerprint)      # the stream reads the answer cache; only /v1/query fills it
-        chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec)
+        chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec, backend=rbackend)
         stages["retrieve_ms"], stages["pool"] = _ms(tick), len(chunks)
         stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")
         stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") == "rag_engine")
@@ -463,7 +496,7 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
                         usage.get("cached_tokens", 0), done["latency_ms"],
                         answerable, confidence, "stream",
                         modality=modality_of(kinds), model=model,
-                        backend=backend, cost_usd=usage.get("cost_usd"), guard=verdict, stages=stages)
+                        backend=backend, cost_usd=usage.get("cost_usd"), guard=verdict, stages=stages, retrieval_backend=rbackend)
         log.info(json.dumps(row))
         _record(row["cost_usd"])
         yield f"event: done\ndata: {json.dumps(done)}\n\n"

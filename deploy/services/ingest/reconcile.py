@@ -224,8 +224,9 @@ def main() -> int:
     from managed import Mirror
     db = firestore.Client(project=a.project)
     # The managed mirror (P9.2): a version this walk retires leaves the tenant's managed stores too. MANAGED_MIRROR
-    # and RESIDENCY come from the shell (make reconcile / make retire) or the job's env (reconcile.tf); off is silent.
-    mirror = Mirror.from_env(db, os.environ.get("MANAGED_MIRROR", "off"), os.environ.get("RESIDENCY", "us"))
+    # comes from the shell (make reconcile / make retire) or the job's env (reconcile.tf); off is silent. A delete
+    # needs no data-region policy - it is the direction the policy wants (managed.py, 13 September 2026 evening).
+    mirror = Mirror.from_env(db, os.environ.get("MANAGED_MIRROR", "off"))
     gcs = storage.Client(project=a.project)
     bucket_name = a.bucket or f"{a.project}-uploads"
     bucket = gcs.bucket(bucket_name)

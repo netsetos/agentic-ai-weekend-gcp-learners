@@ -7,12 +7,16 @@ RETRIEVAL_MODES = ("dense", "hybrid")
 GRAPH_MODES = ("off", "on", "auto")          # 4.6's graph on the lane (13 September 2026, shared/documind_graph.py)
 
 
-def check_retrieval_modes(backend: str, mode: str, graph: str = "off", residency: str = "us") -> None:
+def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
     """RETRIEVAL_MODE against RETRIEVAL_BACKEND, at startup (12 September 2026, R06). Hybrid is Vector Search's
     HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so on the lean
     profile RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
     what its environment says must not start: the message names the fix, so it is read on the failed deploy and not
-    found in the rows a week later. An unknown value is refused for the same reason - a typo ran dense too."""
+    found in the rows a week later. An unknown value is refused for the same reason - a typo ran dense too.
+
+    What is NOT judged here since 13 September 2026 (evening): whether a managed backend may serve a tenant. That is
+    the tenant's data_region (tenant_settings/{tenant}, shared/tenancy.py), asked per request in main.py's
+    choose_for - a deployment variable cannot know that one tenant may leave India and another may not."""
     if backend not in RETRIEVAL_BACKENDS or mode not in RETRIEVAL_MODES:
         raise ValueError(f"RETRIEVAL_BACKEND={backend!r} RETRIEVAL_MODE={mode!r}: the backend is one of "
                          f"{'|'.join(RETRIEVAL_BACKENDS)} and the mode one of {'|'.join(RETRIEVAL_MODES)}")
@@ -22,10 +26,6 @@ def check_retrieval_modes(backend: str, mode: str, graph: str = "off", residency
     if backend in MANAGED_BACKENDS and mode == "hybrid":
         raise ValueError(f"RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: {backend} embeds and searches on its own "
                          "terms (a managed store has no sparse leg to fuse). Set RETRIEVAL_MODE=dense.")
-    if backend in MANAGED_BACKENDS and residency != "us":
-        raise ValueError(f"RETRIEVAL_BACKEND={backend} needs RESIDENCY=us: serverless RAG Engine corpora are us-central1-only "
-                         "(4.3), so the tenant's text and questions leave asia-south1. Set RETRIEVAL_BACKEND=firestore "
-                         "or vector, or run the lane with RESIDENCY=us (managed-retrieval-plan-2026-09-13.md, D6).")
     if backend == "firestore" and mode == "hybrid":
         raise ValueError("RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: the Firestore backend (the lean profile) "
                          "is dense-only. Set RETRIEVAL_MODE=dense, or deploy the full profile with a Vector Search "
@@ -42,11 +42,12 @@ class Settings(BaseSettings):
     # fallback beneath it (the chaos rung). `firestore` - the kit's lean profile - is
     # Firestore's own vector index alone: no endpoint to keep warm, the same tenant
     # pre-filter, the ANN tier left out. Nothing else in the service changes.
-    retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore | rag_engine (P9.4)
-    # P9.4 (13 September 2026): the residency story this revision serves under (variables.tf's residency; the worker
-    # reads the same variable), which a managed backend is refused outside of; the corpora's region (serverless RAG
-    # Engine: us-central1 only); 4.3's cosine-distance threshold on a context.
-    residency: str = Field("us", alias="RESIDENCY")
+    retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore | rag_engine (P9.4): the DEFAULT
+    # P9.4 (13 September 2026): the corpora's region (serverless RAG Engine: us-central1 only) and 4.3's cosine-distance
+    # threshold on a context. RETRIEVAL_BACKEND is the deployment's default since the evening of that day: the same
+    # tenant_settings/{tenant} document that pins a tenant's model (11.4) may pin its retrieval_backend, and its
+    # data_region decides whether a managed store may serve it at all - a managed backend for an `in` tenant is the
+    # kit's own index with policy_fallback=1 on the row (main.py's choose_for and retrieval_backend_for).
     rag_location: str = Field("us-central1", alias="RAG_LOCATION")
     rag_distance_threshold: float = Field(0.5, alias="RAG_DISTANCE_THRESHOLD")
     # The ledger (12.5, 11 September 2026): `on` retrieves only chunks the ledger marks current - one
@@ -141,7 +142,7 @@ class Settings(BaseSettings):
         # Refused here, at import, so a revision with an impossible pair never serves: the deploy fails with the
         # message above instead of a service that runs dense and reports hybrid. /version reports the mode that
         # passed this check - the effective one.
-        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph, self.residency)
+        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph)
         return self
 
 settings = Settings()

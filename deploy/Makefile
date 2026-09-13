@@ -8,6 +8,7 @@
 # Tier B (live, needs gcloud + terraform + a throwaway project — YOU run these on GCP):
 #     make plan  PROJECT=documind-ai-live-0910     terraform dry run (creates nothing)
 #     make up    PROJECT=...                        apply, build + deploy the services, seed the roster
+#     make tenant-policy TENANT= DATA_REGION=in|any   where a tenant's text may be held (13 September 2026): in = the kit's rows only; any = the managed stores too
 #     make media [MEDIA_ARGS=--video]              the corpus's figures (and the town hall video) under evals/corpus/
 #     make ingest-corpus PROJECT=...                the corpus into the uploads bucket, one prefix per tenant
 #     make smoke DOCUMIND_API_URL=https://...       end-to-end smoke test
@@ -104,7 +105,8 @@ RETRIEVAL_GRAPH ?= off
 # P9 (13 September 2026, managed-retrieval-plan-2026-09-13.md): the managed mirror - the ledger's current versions copied
 # into a RAG Engine corpus (4.3) and / or a Vertex AI Search data store (4.4) per tenant, for the rag_engine and
 # vertex_search backends. MANAGED_MIRROR is the worker's, the batch job's and the walk's switch (off | rag_engine |
-# vertex_search | both; refused unless RESIDENCY=us); MANAGED_SEARCH=true declares the data stores (managed.tf);
+# vertex_search | both) - the deployment's capability list; which TENANTS may be mirrored is each tenant's data_region
+# (make tenant-policy, 13 September 2026 evening). MANAGED_SEARCH=true declares the data stores (managed.tf);
 # RAG_LOCATION is the corpora's region (serverless: us-central1 only). Off on the lane; a candidate judges them.
 MANAGED_MIRROR  ?= off
 MANAGED_SEARCH  ?= false
@@ -181,7 +183,7 @@ SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-
         gpu-quota gpu-cap gpu-cap-off off off-now \
         release-candidate record-candidate promote rollback smoke-all usage ingest-one poison dlq down-services \
         reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex \
-        batch queued batch-job graph managed-status rag-corpus rag-engine-enable
+        batch queued batch-job graph managed-status rag-corpus rag-engine-enable tenant-policy
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -398,6 +400,21 @@ roster: guard-project
 	@# tenant argument, and a task naming another tenant is the MCP server's refusal - the replay.
 	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy add acme \
 	    documind-agent-sa@$(PROJECT).iam.gserviceaccount.com
+	@# The demo's data-region policies (13 September 2026, evening): acme and zeta may be mirrored into the
+	@# managed stores (4.3's corpus, 4.4's data store) and read from them; globex's text never leaves the
+	@# kit's own rows - the same deployment shows both. Absent would mean `in` for all three.
+	@for t in acme zeta; do \
+	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy policy $$t any; \
+	done
+	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy policy globex in
+
+# Where ONE tenant's text may be held: tenant_settings/{TENANT}.data_region (shared/tenancy.py). `in` keeps it on
+# the kit's rows (asia-south1); `any` lets the managed mirror copy its current versions into RAG Engine (us-central1)
+# and Vertex AI Search (global) and the API read them (RETRIEVAL_BACKEND, or the tenant's own retrieval_backend
+# pin). No service can write this field; without DATA_REGION the target prints the tenant's current policy.
+tenant-policy: guard-project
+	@test -n "$(TENANT)" || (echo "TENANT=<id> is required"; exit 2); \
+	GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy policy $(TENANT) $(DATA_REGION)
 
 # The corpus, one prefix per tenant, into the bucket eventarc.tf watches. Every object is one
 # ingest: Document AI, embeddings, Firestore. Watch documind-ingest's logs and the DLQ.
@@ -509,7 +526,7 @@ tune: guard-project
 #   make eval-live API=https://candidate---documind-api-NUMBER.us-central1.run.app
 candidate: guard-project
 	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --no-traffic --tag candidate \
-	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)$(if $(RETRIEVAL_BACKEND),|RETRIEVAL_BACKEND=$(RETRIEVAL_BACKEND)|RAG_LOCATION=$(RAG_LOCATION)|RESIDENCY=$(RESIDENCY),)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
+	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)$(if $(RETRIEVAL_BACKEND),|RETRIEVAL_BACKEND=$(RETRIEVAL_BACKEND)|RAG_LOCATION=$(RAG_LOCATION),)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
 	@$(MAKE) --no-print-directory record-candidate PROJECT=$(PROJECT) REGION=$(REGION)
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	echo ">> candidate: https://candidate---documind-api-$$NUMBER.$(REGION).run.app (no traffic; remove with gcloud run services update-traffic documind-api --remove-tags candidate)"
@@ -863,7 +880,7 @@ reindex: guard-project
 # just taken down. make restore is the way back.
 retire: guard-project
 	@test -n "$(SOURCE)" || (echo "SOURCE=<tenant/name or gs://...> is required"; exit 2); \
-	MANAGED_MIRROR=$(MANAGED_MIRROR) RESIDENCY=$(RESIDENCY) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
+	PYTHONPATH=. MANAGED_MIRROR=$(MANAGED_MIRROR) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
 	  $(PY) services/ingest/reconcile.py --project $(PROJECT) --retire "$(SOURCE)" --apply
 
 # bring a withdrawn source back (SOURCE= as for retire): the tombstone is cleared and the object rewritten onto
@@ -876,7 +893,7 @@ restore: guard-project
 
 # the full reconciliation: the bucket's current generations against sources/. Prints the plan; APPLY=1 acts.
 reconcile: guard-project
-	MANAGED_MIRROR=$(MANAGED_MIRROR) RESIDENCY=$(RESIDENCY) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
+	PYTHONPATH=. MANAGED_MIRROR=$(MANAGED_MIRROR) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
 	  $(PY) services/ingest/reconcile.py --project $(PROJECT) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
 
 # once, after the ledger ships onto a lane that predates it: chunks and documents get current=true, a doc_key and
@@ -926,7 +943,7 @@ rag-corpus: guard-project
 	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) EMBEDDING_MODEL=$(EMBEDDING_MODEL) \
 	  $(PY) managed.py --project $(PROJECT) --create-corpus --tenant $(TENANT)
 managed-status: guard-project
-	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit RESIDENCY=$(RESIDENCY) \
+	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit \
 	  $(PY) managed.py --project $(PROJECT) --status --mode $(if $(filter off,$(MANAGED_MIRROR)),both,$(MANAGED_MIRROR)) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),)
 
 # ---------- 4.6's graph, on the lane (13 September 2026) ----------

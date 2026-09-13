@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request
@@ -20,6 +21,7 @@ from pypdf import PdfReader
 # way services/chat consumes documind_tools.
 from shared.pii import inspect_image as pii_inspect_image, inspect_many as pii_inspect_many
 from shared.audit_log import emit as audit_emit
+from shared.tenancy import policy_for
 
 from contracts import IngestMessage, DocumentContract, chunk_hash, effective_from_of, sha256_of
 from idempotency import (claim, current_chunks, finish, reactivate, record_source, refresh_fingerprint, release,
@@ -36,9 +38,25 @@ _db = firestore.Client()
 _gcs = storage.Client()
 # THE MANAGED MIRROR (P9.2, 13 September 2026): the tenant's RAG Engine corpus and / or Vertex AI Search data store
 # (lessons 4.3 and 4.4), kept to the ledger's current versions from here - after the swap, after the undo - and
-# never able to fail an ingest (managed.py). MANAGED_MIRROR=off on the lane; anything else is refused at startup
-# unless RESIDENCY=us, because neither store keeps the India story.
-_mirror = Mirror.from_env(_db)
+# never able to fail an ingest (managed.py). MANAGED_MIRROR=off on the lane. Which TENANTS may be mirrored is not the
+# deployment's to say (13 September 2026, evening): tenant_settings/{tenant}.data_region is - `in` (absent too) keeps
+# the text on these rows, `any` lets a store outside India hold a copy (shared/tenancy.py, make tenant-policy) - read
+# once a minute per tenant, the way the API reads the same document for its pins.
+_POLICY: dict = {}
+
+
+def tenant_policy(tenant_id: str) -> str:
+    """The tenant's data_region (shared/tenancy.policy_for over this worker's client), cached for a minute."""
+    now = time.time()
+    hit = _POLICY.get(tenant_id)
+    if hit and now - hit[0] < 60:
+        return hit[1]
+    policy = policy_for(tenant_id, _db)
+    _POLICY[tenant_id] = (now, policy)
+    return policy
+
+
+_mirror = Mirror.from_env(_db, policy_for=tenant_policy)
 INDEX_NAME = os.environ.get("VECTOR_INDEX_NAME", "")
 PROJECT = os.environ["GOOGLE_CLOUD_PROJECT"]
 PROCESSOR_ID = os.environ.get("DOCAI_PROCESSOR_ID", "")    # docai.tf outputs it

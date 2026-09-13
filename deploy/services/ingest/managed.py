@@ -14,9 +14,14 @@ Document AI call); retired() when versions leave (a retirement by the walk, a wi
 document id is the doc_key on both stores - a Vertex AI Search Document.id, a RagFile's display name - so every call
 is idempotent and a listing compares with the ledger. A tenant with no store is mirror_no_store (once), a call that
 fails is mirror_failed (with the error): one line each, never a failed ingest; the walk repairs the mirror (P9.3).
-MANAGED_MIRROR is off | rag_engine | vertex_search | both and is refused unless RESIDENCY=us: serverless corpora are
-us-central1-only and data stores are global, so neither keeps the India story (D6). Figure and segment chunks stay
-on the kit's own index (D4): a store receives text, and only text.
+MANAGED_MIRROR is off | rag_engine | vertex_search | both: the deployment's capability list, which stores exist to
+mirror into. Whether a TENANT's text may go there is the tenant's data_region policy (shared/tenancy.py; the plan's
+section 7, 13 September 2026 evening): `in` keeps it on the kit's rows in asia-south1, `any` permits a store outside
+India, absent is `in`. The mirror asks the policy per document (policy_for, the worker's cached reader), skips a store
+it forbids (mirror_policy_skipped, once per tenant and store), writes a `doc.mirror` audit event for every copy that
+went into or left a store, and stamps `mirrored` on the ledger row so GET /v1/sources says where a document is held.
+A delete is never refused: it is the direction the policy wants. Figure and segment chunks stay on the kit's own
+index (D4): a store receives text, and only text.
 """
 from __future__ import annotations
 
@@ -35,16 +40,15 @@ CHUNK_SIZE, CHUNK_OVERLAP = 512, 100          # what 4.3's ManagedRAG.ingest() a
 STRUCT_FIELDS = ("tenant_id", "doc_key", "source_uri", "kind", "title", "doc_type", "effective_from", "generation", "name")
 
 
-def check_mode(mode: str | None, residency: str | None) -> str:
-    """MANAGED_MIRROR against RESIDENCY, at startup: an unknown value and a mirror under any residency but `us` are
-    refused with the reason, so a revision that would ship a tenant's text out of India never serves."""
+def check_mode(mode: str | None) -> str:
+    """MANAGED_MIRROR at startup: an unknown value is refused with the list. Nothing else is judged here since
+    13 September 2026 (evening): the mode says which stores this deployment CAN mirror into; whether a tenant's text
+    MAY go there is its data_region, asked per document (Mirror.permitted) - a deployment variable cannot know that
+    one tenant may leave India and another may not, and the old refusal ("needs RESIDENCY=us") made it a story about
+    the whole deployment."""
     mode = (mode or "off").strip().lower()
     if mode not in MODES:
         raise ValueError(f"MANAGED_MIRROR={mode!r}: one of {'|'.join(MODES)}")
-    if mode != "off" and (residency or "india") != "us":
-        raise RuntimeError(f"MANAGED_MIRROR={mode} needs RESIDENCY=us: serverless RAG Engine corpora are us-central1-only and "
-                           "Vertex AI Search data stores are global (4.3, 4.4), so neither keeps the India story. Set "
-                           "MANAGED_MIRROR=off, or run the lane with RESIDENCY=us.")
     return mode
 
 
@@ -83,6 +87,12 @@ class RagEngineStore:
         self.project, self.location, self.embedding_model = project, location, embedding_model
         self._rag = rag
         self._corpora: dict[str, str | None] = {}
+
+    @property
+    def region(self) -> str:
+        """Where the corpus holds the text - the region vertexai.init() is given (serverless corpora: us-central1). What
+        a tenant's data_region is held against (shared/tenancy.permits) and what the audit event records."""
+        return self.location
 
     def rag(self):
         if self._rag is None:
@@ -159,6 +169,11 @@ class VertexSearchStore:
         self.project, self.location, self.bucket = project, location, bucket
         self._c = clients
         self._exists: dict[str, bool] = {}
+
+    @property
+    def region(self) -> str:
+        """Where the data store holds the text: `global` (managed.tf) - outside India by definition."""
+        return self.location
 
     def clients(self):
         if self._c is None:
@@ -237,16 +252,20 @@ class VertexSearchStore:
 
 class Mirror:
     """The worker's, the batch job's and the walk's one door to the stores: every call is one log line per store
-    and raises nothing - an ingest is never failed by its mirror."""
+    and raises nothing - an ingest is never failed by its mirror. `policy_for(tenant_id)` answers the tenant's
+    data_region - the worker's cached reader over shared/tenancy.policy_for, a dict's get in the gate; without one
+    nothing is permitted, the way an absent policy permits nothing. `audit` is shared/audit_log.emit unless
+    injected."""
 
-    def __init__(self, db, stores: list, mode: str = "off"):
+    def __init__(self, db, stores: list, mode: str = "off", policy_for=None, audit=None):
         self.db, self.stores, self.mode = db, list(stores), mode
-        self._said: set[tuple[str, str]] = set()
+        self.policy_for = policy_for or (lambda tenant_id: "in")
+        self._audit = audit
+        self._said: set[tuple] = set()
 
     @classmethod
-    def from_env(cls, db, mode: str | None = None, residency: str | None = None) -> "Mirror":
-        mode = check_mode(os.environ.get("MANAGED_MIRROR", "off") if mode is None else mode,
-                          os.environ.get("RESIDENCY", "india") if residency is None else residency)
+    def from_env(cls, db, mode: str | None = None, policy_for=None, audit=None) -> "Mirror":
+        mode = check_mode(os.environ.get("MANAGED_MIRROR", "off") if mode is None else mode)
         stores: list = []
         if mode in ("rag_engine", "both"):
             stores.append(RagEngineStore(os.environ.get("GOOGLE_CLOUD_PROJECT", ""), os.environ.get("RAG_LOCATION", "us-central1"),
@@ -254,14 +273,44 @@ class Mirror:
         if mode in ("vertex_search", "both"):
             stores.append(VertexSearchStore(os.environ.get("GOOGLE_CLOUD_PROJECT", ""), os.environ.get("SEARCH_LOCATION", "global"),
                                             os.environ.get("AUDIT_BUCKET", "")))
-        return cls(db, stores, mode)
+        return cls(db, stores, mode, policy_for=policy_for, audit=audit)
 
     @property
     def active(self) -> bool:
         return bool(self.stores)
 
-    def _each(self, op: str, tenant_id: str, doc_key: str, fn) -> None:
+    def policy(self, tenant_id: str) -> str:
+        """The tenant's data_region, never raised: a reader that fails answers `in` (nothing leaves), logged once."""
+        try:
+            return self.policy_for(tenant_id)
+        except Exception as e:  # noqa: BLE001 - an unreadable policy is the strict one
+            if ("policy_unreadable", tenant_id) not in self._said:
+                self._said.add(("policy_unreadable", tenant_id))
+                log.warning(json.dumps({"event": "mirror_policy_unreadable", "tenant": tenant_id, "error": f"{type(e).__name__}: {e}"[:200]}))
+            return "in"
+
+    def permitted(self, tenant_id: str, doc_key: str, op: str) -> list:
+        """The stores the tenant's policy lets this text into: every one under `any`, only a store inside India under
+        `in` (shared/tenancy.permits - none of the managed stores is there today). A forbidden store is one
+        mirror_policy_skipped line per tenant and store, then silence: the skip is the policy working, not an error."""
+        from shared.tenancy import permits       # shared/ ships beside the service (the Dockerfile); PYTHONPATH=. from deploy/
+        policy = self.policy(tenant_id)
+        out = []
         for store in self.stores:
+            region = getattr(store, "region", "")
+            if permits(policy, region):
+                out.append(store)
+            elif ("policy", store.name, tenant_id) not in self._said:
+                self._said.add(("policy", store.name, tenant_id))
+                log.info(json.dumps({"event": "mirror_policy_skipped", "store": store.name, "region": region, "tenant": tenant_id,
+                                     "doc_key": doc_key, "op": op, "data_region": policy,
+                                     "why": "the tenant's data_region keeps its text on the kit's own rows (make tenant-policy)"}))
+        return out
+
+    def _each(self, op: str, tenant_id: str, doc_key: str, fn, stores: list | None = None) -> list:
+        """One call per store, one line each; the stores that confirmed come back, and each confirmation is audited."""
+        done = []
+        for store in (self.stores if stores is None else stores):
             try:
                 result = fn(store)
             except NoStore as e:
@@ -276,36 +325,82 @@ class Mirror:
                 continue
             log.info(json.dumps({"event": "mirror_ok", "store": store.name, "tenant": tenant_id, "doc_key": doc_key,
                                  "op": op, "result": str(result)[:200]}))
+            done.append(store)
+            self._record(op, store, tenant_id, doc_key, result)
+        return done
 
-    def upsert(self, tenant_id: str, doc_key: str, source_uri: str, text: str, meta: dict | None = None) -> None:
+    def _record(self, op: str, store, tenant_id: str, doc_key: str, result) -> None:
+        """doc.mirror: the audit event that a copy of a tenant's text went into, or left, a store outside the kit - the
+        store, its region, the doc_key, the op - beside doc.upload in the retention bucket (shared/audit_log.py). The
+        record that a border was crossed, which is what a residency question turns into once it is a policy and not
+        a story. Best-effort like every line here: a failed emit is one mirror_audit_failed line, never a failed ingest."""
+        try:
+            if self._audit is None:
+                from shared.audit_log import emit
+                self._audit = emit
+            self._audit("doc.mirror", actor={"tenant_id": tenant_id, "email": "system:ingest"},
+                        target={"type": "document", "id": doc_key, "tenant_id": tenant_id},
+                        meta={"store": store.name, "region": getattr(store, "region", ""), "op": op, "result": str(result)[:200]})
+        except Exception as e:  # noqa: BLE001
+            log.warning(json.dumps({"event": "mirror_audit_failed", "store": store.name, "tenant": tenant_id, "doc_key": doc_key,
+                                    "op": op, "error": f"{type(e).__name__}: {e}"[:200]}))
+
+    def upsert(self, tenant_id: str, doc_key: str, source_uri: str, text: str, meta: dict | None = None) -> dict:
+        """The version's text into every store the policy permits. Returns {store: region} for the stores that
+        confirmed - what after_swap() and after_undo() stamp on the ledger row; empty is a real answer."""
         if not self.stores:
-            return
+            return {}
         if not text or not text.strip():
             log.info(json.dumps({"event": "mirror_skipped", "tenant": tenant_id, "doc_key": doc_key,
                                  "why": "no text: a media version stays on the kit's own index"}))
-            return
+            return {}
         meta = {k: v for k, v in (meta or {}).items() if v is not None}
-        self._each("upsert", tenant_id, doc_key, lambda s: s.upsert(tenant_id, doc_key, source_uri, text, meta))
+        stores = self.permitted(tenant_id, doc_key, "upsert")
+        done = self._each("upsert", tenant_id, doc_key, lambda s: s.upsert(tenant_id, doc_key, source_uri, text, meta), stores)
+        return {s.name: getattr(s, "region", "") for s in done}
 
     def retired(self, tenant_id: str, doc_keys, why: str = "retired") -> None:
+        """Every store, whatever the policy: a delete is the direction the policy wants, and a store that never held the
+        version answers NotFound (0) rather than refusing."""
         for doc_key in doc_keys:
             self._each(f"delete:{why}", tenant_id, doc_key, lambda s, k=doc_key: s.delete(tenant_id, k))
 
+    def stamp(self, tenant_id: str, name: str | None, doc_key: str, held: dict) -> None:
+        """`mirrored` on the ledger row - sources/{tenant~name}, the id idempotency.source_id_for mints - the stores that
+        confirmed this version and the region each holds it in, the policy it was judged under, and when; so GET
+        /v1/sources and the UI's Documents page say where a document is held. An empty dict is a real answer (a
+        policy of `in`, or no store confirming): the row reads "the kit's rows only". Merged, so record_source() and
+        this land in either order; best-effort like every line here."""
+        if not name:
+            return
+        try:
+            from google.cloud import firestore
+            self.db.collection("sources").document(name.replace("/", "~")).set(
+                {"mirrored": dict(held), "data_region": self.policy(tenant_id), "mirrored_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        except Exception as e:  # noqa: BLE001
+            log.warning(json.dumps({"event": "mirror_stamp_failed", "tenant": tenant_id, "doc_key": doc_key,
+                                    "error": f"{type(e).__name__}: {e}"[:200]}))
+
     def after_swap(self, doc, text: str, gone: dict, meta: dict | None = None) -> None:
-        """swap_versions() just made `doc` current: the store gets its text, and the versions the swap retired leave."""
+        """swap_versions() just made `doc` current: the permitted stores get its text, the versions the swap retired
+        leave every store, and the ledger row says which stores hold it."""
         if not self.stores:
             return
-        self.upsert(doc.tenant_id, doc.doc_key, doc.gcs_uri, text,
-                    {"doc_type": doc.doc_type, "effective_from": doc.effective_from, **(meta or {})})
+        meta = meta or {}
+        held = self.upsert(doc.tenant_id, doc.doc_key, doc.gcs_uri, text,
+                           {"doc_type": doc.doc_type, "effective_from": doc.effective_from, **meta})
         self.retired(doc.tenant_id, [k for k in gone.get("retired_doc_keys", []) if k != doc.doc_key], "superseded")
+        self.stamp(doc.tenant_id, meta.get("name"), doc.doc_key, held)
 
     def after_undo(self, tenant_id: str, gcs_uri: str, doc_key: str, gone: dict, meta: dict | None = None) -> None:
         """The undo made `doc_key` current again: its text comes off its own rows; the newer version leaves."""
         if not self.stores:
             return
+        meta = meta or {}
         text, rows_meta = version_rows(self.db, tenant_id, doc_key)
-        self.upsert(tenant_id, doc_key, gcs_uri, text, {**rows_meta, **(meta or {})})
+        held = self.upsert(tenant_id, doc_key, gcs_uri, text, {**rows_meta, **meta})
         self.retired(tenant_id, [k for k in gone.get("retired_doc_keys", []) if k != doc_key], "superseded")
+        self.stamp(tenant_id, meta.get("name"), doc_key, held)
 
 
 def status(db, stores: list, tenant_only: str | None = None) -> list[dict]:
@@ -364,9 +459,9 @@ def main() -> int:
     if args.status:
         from google.cloud import firestore
         db = firestore.Client(project=args.project)
-        mode = check_mode(args.mode, os.environ.get("RESIDENCY", "us"))
+        mode = check_mode(args.mode)
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", args.project)
-        mirror = Mirror.from_env(db, mode=mode, residency="us")
+        mirror = Mirror.from_env(db, mode=mode)
         for line in status(db, mirror.stores, args.tenant):
             print(json.dumps(line))
         return 0

@@ -167,7 +167,8 @@ def _managed_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | No
     the scale the Firestore path uses. A caller's filters apply to the mapped chunks as on every path; figure and
     segment rows join from the kit's own index (D4), unless the caller asked for text alone. A tenant with no
     corpus, or a store that will not answer, is the Firestore rung with the filters, logged rag_engine_fallback -
-    never an empty pool that reads as a refusal. RESIDENCY=india refuses this backend at startup (config.py)."""
+    never an empty pool that reads as a refusal. A tenant whose data_region is `in` never reaches this: main.py's
+    choose_for sends it to the kit's own index (policy_fallback) before retrieve() is called (13 September 2026)."""
     kind = (filters or {}).get("kind")
     if kind and kind != "text":                        # figures or segments only: the store has none, the index has them
         return _media_rows(vec, tenant_id, settings.top_k_retrieve, filters)
@@ -212,14 +213,16 @@ def _managed_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | No
     return sorted(out, key=lambda c: -c["score"])[:settings.top_k_retrieve]
 
 def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
-                    vec: list[float] | None = None) -> list[dict]:
+                    vec: list[float] | None = None, backend: str | None = None) -> list[dict]:
     """The dense pool: Vector Search (dense or hybrid) with the Firestore fallback beneath it, Firestore's own
     vector index on the lean profile, or a managed store (rag_engine, P9.4) - the same tenant / current / filter
-    predicates on every path."""
+    predicates on every path. `backend` is the one main.py chose for THIS request (the tenant's pin, held against
+    its data_region - 13 September 2026, evening); the deployment's RETRIEVAL_BACKEND when the caller names none."""
+    backend = backend or settings.retrieval_backend
     vec = vec if vec is not None else embed_query(query)    # main.py embeds once: the answer cache looked it up first
-    if settings.retrieval_backend == "rag_engine":
+    if backend == "rag_engine":
         return prefer_current(_managed_retrieve(query, tenant_id, top_k, filters, vec=vec))
-    if settings.retrieval_backend == "firestore":
+    if backend == "firestore":
         # The lean profile (deploy/README.md): no Vector Search endpoint exists, on purpose.
         # Firestore holds every embedding indexer.py wrote and its own vector index answers,
         # tenant pre-filtered - the fallback below, chosen rather than fallen into.
@@ -309,11 +312,12 @@ def graph_candidates(query: str, tenant_id: str, filters: dict | None = None) ->
 
 
 def retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
-             vec: list[float] | None = None) -> list[dict]:
+             vec: list[float] | None = None, backend: str | None = None) -> list[dict]:
     """The pool the reranker sees: the graph's chunks first, when RETRIEVAL_GRAPH says so, then the dense candidates
-    that are not already in it, cut to TOP_K_RETRIEVE; a retired version never survives either half."""
+    that are not already in it, cut to TOP_K_RETRIEVE; a retired version never survives either half. `backend` is
+    the request's (main.py), the setting by default."""
     graph = graph_candidates(query, tenant_id, filters)
-    dense = _dense_retrieve(query, tenant_id, top_k, filters, vec=vec)
+    dense = _dense_retrieve(query, tenant_id, top_k, filters, vec=vec, backend=backend)
     if not graph:
         return dense
     seen = {c["id"] for c in graph}

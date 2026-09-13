@@ -5,8 +5,9 @@
 # `global` (the only home a generic data store has), behind MANAGED_SEARCH=true. A RAG Engine corpus is not a
 # Terraform resource: `make rag-corpus TENANT=` creates one idempotently by display name, in us-central1 (the
 # only region serverless corpora have), after `make rag-engine-enable` has switched the project to serverless
-# mode once (4.3's one-time prep). Neither store keeps the India story, which is why the worker refuses the
-# mirror unless RESIDENCY=us (managed.py: check_mode).
+# mode once (4.3's one-time prep). Neither store is inside India (us-central1, global), so a tenant's text reaches
+# them only when its data_region policy says `any` (tenant_settings/{tenant}, make tenant-policy; managed.py asks
+# per document and audits every copy) - the `tenants` variable lists the tenants whose policy is `any`.
 variable "managed_search" {
   type        = bool
   default     = false

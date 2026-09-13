@@ -21,6 +21,16 @@ WHY A PERSON HAS ONE TENANT HERE. The reverse lookup returns the first match. Do
 is that a person belongs to one customer; a consultant working for two would need this to
 return a list and every caller to choose, which is a product decision, not a code change. Said
 out loud because "it returns the first row" is otherwise indistinguishable from a bug.
+
+THE DATA-REGION POLICY (13 September 2026, evening). The roster says who may read a tenant's documents;
+`tenant_settings/{tenant}.data_region` says where the platform may HOLD them - `in` (the kit's own rows in
+asia-south1 and nothing else) or `any` (a managed store outside India may keep a copy: RAG Engine in
+us-central1, Vertex AI Search in global - services/ingest/managed.py mirrors current versions there, and
+rag-api reads them as a retrieval backend). Absent means `in`: fail closed. It is read here by the two
+services (policy_for, permits) and written only by the operator (set_policy, `make tenant-policy`), for
+the same reason membership is: a service that could widen its own tenant's region would be a service that
+could enrol itself. Residency stopped being a deployment variable that day (managed-retrieval-plan
+2026-09-13.md, section 7) and became this document, one field per tenant.
 """
 from __future__ import annotations
 
@@ -77,6 +87,57 @@ def list_members(tenant_id: str) -> list[str]:
                   .collection("members").stream())
 
 
+# ---- the data-region policy (13 September 2026, evening) ---------------------------------
+# Where a tenant's text may be held, per tenant, as data. tenant_settings/{tenant} is the
+# document 11.4's pin already reads once a minute (model_backend, generator_model); the policy
+# is one more field of it, so a tenant is one document to an operator and one read to a
+# service. A store declares the region it holds data in (RagEngineStore.region, Vertex
+# SearchStore.region in services/ingest/managed.py); permits() is the whole rule, so a Mumbai
+# RAG Engine region one day changes nothing here.
+
+DATA_REGIONS = ("in", "any")                  # in: never leaves India; any: a managed store may hold a copy
+INDIA_REGION_PREFIXES = ("asia-south",)       # asia-south1 Mumbai, asia-south2 Delhi
+
+
+def policy_of(doc: dict | None) -> str:
+    """The data_region a tenant_settings document declares - `in` unless it says `any`. The one normalisation both
+    readers use: a missing field, an unknown value or no document at all is `in`, never a guess."""
+    region = str((doc or {}).get("data_region") or "in").strip().lower()
+    return region if region in DATA_REGIONS else "in"
+
+
+def policy_for(tenant_id: str, db=None) -> str:
+    """The tenant's data_region, read from Firestore (the worker passes its own client; the gate a fake). Fail closed:
+    a failed read is `in` too - an unreadable policy is the strict one, not the permissive one."""
+    if not tenant_id:
+        return "in"
+    try:
+        snap = (db or _db()).collection("tenant_settings").document(tenant_id).get()
+        return policy_of((snap.to_dict() or {}) if snap.exists else {})
+    except Exception:  # noqa: BLE001 - the policy is a guard; when it cannot be read nothing leaves
+        return "in"
+
+
+def permits(policy: str, region: str | None) -> bool:
+    """May a store in `region` hold text under this policy? `any` permits every store; `in` permits a store inside
+    India only - none of the managed stores is there today (us-central1, global), and the rule is data, not code."""
+    if policy == "any":
+        return True
+    return str(region or "").strip().lower().startswith(INDIA_REGION_PREFIXES)
+
+
+def set_policy(tenant_id: str, region: str) -> str:
+    """The operator's write: tenant_settings/{tenant}.data_region, the pin's other fields kept (merge). Refuses
+    anything but in | any - a typo must not widen a tenant's region by falling through to a default."""
+    from google.cloud import firestore
+    region = (region or "").strip().lower()
+    if region not in DATA_REGIONS:
+        raise ValueError(f"data_region={region!r}: one of {'|'.join(DATA_REGIONS)}")
+    (_db().collection("tenant_settings").document(tenant_id)
+         .set({"data_region": region, "data_region_set_at": firestore.SERVER_TIMESTAMP}, merge=True))
+    return region
+
+
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="the tenant roster, from the operator's side")
@@ -85,10 +146,17 @@ if __name__ == "__main__":
     a.add_argument("tenant"); a.add_argument("email")
     l = sub.add_parser("list", help="who is on a tenant's roster")
     l.add_argument("tenant")
+    p = sub.add_parser("policy", help="where a tenant's text may be held: in | any (make tenant-policy); alone, print it")
+    p.add_argument("tenant"); p.add_argument("region", nargs="?", choices=DATA_REGIONS)
     args = ap.parse_args()
     if args.cmd == "add":
         add_member(args.tenant, args.email)
         print(f"{args.email.lower()} is on {args.tenant}")
+    elif args.cmd == "policy":
+        if args.region:
+            print(f"{args.tenant}: data_region={set_policy(args.tenant, args.region)}")
+        else:
+            print(f"{args.tenant}: data_region={policy_for(args.tenant)}")
     else:
         for m in list_members(args.tenant):
             print(m)
