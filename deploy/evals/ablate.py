@@ -3,7 +3,8 @@
 
     python deploy/evals/ablate.py --project PROJECT              # the 43 anchored rows, four arms (~3 min)
     python deploy/evals/ablate.py --project PROJECT --limit 5    # a wiring check, under a minute
-    make ablate PROJECT=...                                      # the same, from deploy/
+    python deploy/evals/ablate.py --project PROJECT --arms all   # the four and the managed arm (P9.6: needs the mirror)
+    make ablate PROJECT=...                                      # the same, from deploy/ (ABLATE_ARGS="--arms all")
 
 One knob per arm, everything else held (lesson 4.8, Part 5):
 
@@ -12,6 +13,11 @@ One knob per arm, everything else held (lesson 4.8, Part 5):
     dense 50 -> rerank 5          the same reranker over a deeper candidate list
     hybrid 20 -> rerank 5         4.5's RRF over the dense ids and a BM25 leg (alpha 0.7) - which the
                                   lean profile does NOT wire: hybrid.py rides Vector Search only
+    rag_engine 20 -> rerank 5     P9.4's backend from outside it (13 September 2026): 4.3's corpus - the
+                                  mirror's, one RagFile per version named by its doc_key - queried by text,
+                                  each context's doc_key resolved to its source through the kit's own rows.
+                                  Behind --arms all (or --arms rag_engine): a lane without the mirror has
+                                  no corpus, and an arm that cannot run is a finding, not the harness's exit
 
 Scored on the golden rows that carry `must_retrieve` anchors, by recall and MRR against source
 file + text (the way run_eval.py matches: the worker's chunk ids name neither the clause nor
@@ -40,6 +46,9 @@ import re
 import statistics
 import sys
 import time
+
+ARM_KEYS = ("dense5", "dense20", "dense50", "hybrid", "rag_engine")
+DEFAULT_ARMS = ("dense5", "dense20", "dense50", "hybrid")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 GOLDEN = os.path.join(HERE, "golden.jsonl")
@@ -99,6 +108,7 @@ class Lane:
         self.ranking_config = self.ranker.ranking_config_path(
             project=project, location="global", ranking_config="default_ranking_config")
         self._tenant = {}
+        self._rag_module, self._corpora, self._sources = None, {}, {}
 
     def embed_query(self, q: str) -> list:
         from google.genai import types
@@ -147,6 +157,48 @@ class Lane:
         sparse_ids = [rows[i]["chunk_id"] for i in sorted(range(len(rows)), key=lambda i: -scores[i])[:k] if scores[i] > 0]
         return [by_id[cid] for cid in rrf(dense_ids, sparse_ids, self.alpha)[:k] if cid in by_id]
 
+    def rag(self, location: str = "us-central1"):
+        """vertexai.rag on the corpora's region (serverless corpora: us-central1 only), initialised once."""
+        if self._rag_module is None:
+            import vertexai
+            from vertexai import rag
+            vertexai.init(project=self.project, location=os.environ.get("RAG_LOCATION", location))
+            self._rag_module = rag
+        return self._rag_module
+
+    def corpus(self, tenant: str) -> str:
+        """The tenant's corpus by the mirror's name (documind-{tenant}); a tenant without one fails the row."""
+        if tenant not in self._corpora:
+            want = "documind-" + re.sub(r"[^a-z0-9-]+", "-", tenant.lower()).strip("-")
+            name = next((c.name for c in self.rag().list_corpora() if c.display_name == want), None)
+            if name is None:
+                raise RuntimeError(f"no RAG Engine corpus {want!r}: make rag-corpus TENANT={tenant}, then MANAGED_MIRROR=rag_engine")
+            self._corpora[tenant] = name
+        return self._corpora[tenant]
+
+    def source_of(self, tenant: str, doc_key: str) -> str:
+        """A context names its version (the RagFile's display name is the doc_key); the kit's rows name the source."""
+        if doc_key not in self._sources:
+            from google.cloud.firestore_v1.base_query import FieldFilter
+            snap = next(iter(self.db.collection("chunks").where(filter=FieldFilter("tenant_id", "==", tenant))
+                             .where(filter=FieldFilter("doc_key", "==", doc_key)).select(["source_uri"]).limit(1).stream()), None)
+            self._sources[doc_key] = (snap.to_dict() or {}).get("source_uri", "") if snap else ""
+        return self._sources[doc_key]
+
+    def rag_engine(self, question: str, tenant: str, k: int) -> list:
+        """P9.4's backend from outside it: 4.3's corpus queried by text (4.3's distance threshold), the contexts as
+        chunks with the source the ledger knows - what retriever._managed_retrieve() serves, without the API."""
+        rag = self.rag()
+        resp = rag.retrieval_query(
+            rag_resources=[rag.RagResource(rag_corpus=self.corpus(tenant))], text=question,
+            rag_retrieval_config=rag.RagRetrievalConfig(top_k=k, filter=rag.Filter(vector_distance_threshold=0.5)))
+        out = []
+        for i, ctx in enumerate(resp.contexts.contexts):
+            key = getattr(ctx, "source_display_name", "") or ""
+            out.append({"chunk_id": f"{tenant}:{key}#rag-{i}", "text": getattr(ctx, "text", "") or "",
+                        "source_uri": self.source_of(tenant, key) if key else ""})
+        return out
+
     def rerank(self, question: str, chunks: list, top_n: int = 5) -> list:
         from google.cloud import discoveryengine_v1 as discoveryengine
         if not chunks:
@@ -159,13 +211,28 @@ class Lane:
         return [chunks[int(r.id)] for r in resp.records]
 
 
-def arms(lane: Lane) -> list:
-    return [  # name, candidates(question, tenant), reranked to 5?
-        ("dense 5, no reranker", lambda q, t: lane.dense(q, t, 5), False),
-        ("dense 20 -> rerank 5   (the lane)", lambda q, t: lane.dense(q, t, 20), True),
-        ("dense 50 -> rerank 5", lambda q, t: lane.dense(q, t, 50), True),
-        ("hybrid 20 -> rerank 5  (4.5, not wired)", lambda q, t: lane.hybrid(q, t, 20), True),
-    ]
+def arms(lane: Lane, keys=DEFAULT_ARMS) -> list:
+    every = {  # key: (name, candidates(question, tenant), reranked to 5?)
+        "dense5": ("dense 5, no reranker", lambda q, t: lane.dense(q, t, 5), False),
+        "dense20": ("dense 20 -> rerank 5   (the lane)", lambda q, t: lane.dense(q, t, 20), True),
+        "dense50": ("dense 50 -> rerank 5", lambda q, t: lane.dense(q, t, 50), True),
+        "hybrid": ("hybrid 20 -> rerank 5  (4.5, not wired)", lambda q, t: lane.hybrid(q, t, 20), True),
+        "rag_engine": ("rag_engine 20 -> rerank 5  (4.3's corpus, P9.4)", lambda q, t: lane.rag_engine(q, t, 20), True),
+    }
+    return [every[k] for k in keys]
+
+
+def parse_arms(spec: str) -> tuple:
+    """--arms: `all`, or a comma-separated list of arm keys; the default is the four the lane can always run."""
+    if not spec or spec == "default":
+        return DEFAULT_ARMS
+    if spec == "all":
+        return ARM_KEYS
+    keys = tuple(k.strip() for k in spec.split(",") if k.strip())
+    unknown = [k for k in keys if k not in ARM_KEYS]
+    if unknown:
+        raise ValueError(f"unknown arm(s) {unknown}: one of {', '.join(ARM_KEYS)} or all")
+    return keys
 
 
 def main() -> int:
@@ -180,7 +247,14 @@ def main() -> int:
     ap.add_argument("--all-versions", action="store_true",
                     help="retrieve retired rows too (the lane does not: RETRIEVAL_CURRENT_ONLY=on); for a corpus that predates the ledger")
     ap.add_argument("--ledger", help="append one JSON line per arm to this file (the loop's memory)")
+    ap.add_argument("--arms", default="default",
+                    help="which arms: all, or a comma list of " + ", ".join(ARM_KEYS) + " (default: the four the lane always has)")
     a = ap.parse_args()
+    try:
+        keys = parse_arms(a.arms)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
     if not a.project:
         print("--project (or $PROJECT) is required", file=sys.stderr)
         return 2
@@ -194,7 +268,7 @@ def main() -> int:
           f"(project {a.project}, embeddings in {a.region}, ranker on global)\n")
     print(f"{'arm':44} {'recall@depth':>12} {'recall@5':>9} {'mrr':>6} {'rows@1.0':>8} {'p95 ms':>7}")
     failed = 0
-    for name, cands, do_rerank in arms(lane):
+    for name, cands, do_rerank in arms(lane, keys):
         r_depth, r5, rr, ms, errors, misses = [], [], [], [], [], []
         for row in rows:
             t0, c, top = time.time(), None, None
@@ -243,7 +317,8 @@ def main() -> int:
                 f.write(json.dumps({"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "project": a.project, **line}) + "\n")
     print("\nRead it in this order: recall@depth is the reranker's ceiling - if the 20 and 50 rows agree, depth is not the knob;"
           "\nrecall@5 of the lane's row minus the first row is the reranker's lift, and p95 is what it costs;"
-          "\nthe hybrid row says whether a BM25 leg is worth wiring - twenty of the anchors are clause codes, its home ground.")
+          "\nthe hybrid row says whether a BM25 leg is worth wiring - twenty of the anchors are clause codes, its home ground;"
+          "\nthe rag_engine row (--arms all) is 4.3's corpus against the lane's own rows - a managed chunk that splits a clause from its code shows up as a miss.")
     return 1 if failed else 0
 
 

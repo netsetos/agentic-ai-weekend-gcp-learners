@@ -1,12 +1,13 @@
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-RETRIEVAL_BACKENDS = ("vector", "firestore")
+RETRIEVAL_BACKENDS = ("vector", "firestore", "rag_engine")   # rag_engine: 4.3's corpus as the retrieval stage (P9.4, 13 September 2026)
+MANAGED_BACKENDS = ("rag_engine",)           # embed and search on their own terms, outside asia-south1
 RETRIEVAL_MODES = ("dense", "hybrid")
 GRAPH_MODES = ("off", "on", "auto")          # 4.6's graph on the lane (13 September 2026, shared/documind_graph.py)
 
 
-def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
+def check_retrieval_modes(backend: str, mode: str, graph: str = "off", residency: str = "us") -> None:
     """RETRIEVAL_MODE against RETRIEVAL_BACKEND, at startup (12 September 2026, R06). Hybrid is Vector Search's
     HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so on the lean
     profile RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
@@ -18,6 +19,13 @@ def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
     if graph not in GRAPH_MODES:
         raise ValueError(f"RETRIEVAL_GRAPH={graph!r}: one of {'|'.join(GRAPH_MODES)} - off touches nothing, on walks the tenant's "
                          "graph for every question, auto only for a relational question with a seed entity (4.6's choose_mode)")
+    if backend in MANAGED_BACKENDS and mode == "hybrid":
+        raise ValueError(f"RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: {backend} embeds and searches on its own "
+                         "terms (a managed store has no sparse leg to fuse). Set RETRIEVAL_MODE=dense.")
+    if backend in MANAGED_BACKENDS and residency != "us":
+        raise ValueError(f"RETRIEVAL_BACKEND={backend} needs RESIDENCY=us: serverless RAG Engine corpora are us-central1-only "
+                         "(4.3), so the tenant's text and questions leave asia-south1. Set RETRIEVAL_BACKEND=firestore "
+                         "or vector, or run the lane with RESIDENCY=us (managed-retrieval-plan-2026-09-13.md, D6).")
     if backend == "firestore" and mode == "hybrid":
         raise ValueError("RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: the Firestore backend (the lean profile) "
                          "is dense-only. Set RETRIEVAL_MODE=dense, or deploy the full profile with a Vector Search "
@@ -34,7 +42,13 @@ class Settings(BaseSettings):
     # fallback beneath it (the chaos rung). `firestore` - the kit's lean profile - is
     # Firestore's own vector index alone: no endpoint to keep warm, the same tenant
     # pre-filter, the ANN tier left out. Nothing else in the service changes.
-    retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore
+    retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore | rag_engine (P9.4)
+    # P9.4 (13 September 2026): the residency story this revision serves under (variables.tf's residency; the worker
+    # reads the same variable), which a managed backend is refused outside of; the corpora's region (serverless RAG
+    # Engine: us-central1 only); 4.3's cosine-distance threshold on a context.
+    residency: str = Field("us", alias="RESIDENCY")
+    rag_location: str = Field("us-central1", alias="RAG_LOCATION")
+    rag_distance_threshold: float = Field(0.5, alias="RAG_DISTANCE_THRESHOLD")
     # The ledger (12.5, 11 September 2026): `on` retrieves only chunks the ledger marks current - one
     # version per document. Off until the second vector index is built and the chunks written before
     # the ledger carry the field (make backfill-current); a switch, judged on a candidate like the others.
@@ -127,7 +141,7 @@ class Settings(BaseSettings):
         # Refused here, at import, so a revision with an impossible pair never serves: the deploy fails with the
         # message above instead of a service that runs dense and reports hybrid. /version reports the mode that
         # passed this check - the effective one.
-        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph)
+        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph, self.residency)
         return self
 
 settings = Settings()

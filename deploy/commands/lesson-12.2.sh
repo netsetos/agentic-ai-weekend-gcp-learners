@@ -33,6 +33,10 @@
 # 13 September 2026: RETRIEVAL_GRAPH=off|on|auto is 4.6's graph on the lane (shared/documind_graph.py, built by make graph):
 # on walks the tenant's graph for every question, auto only for a relational question with a seed entity, and the walk's
 # chunks go in front of the dense pool. Off on the lane; make candidate RETRIEVAL_GRAPH=auto is where it is judged.
+# P9.4 (13 September 2026): RETRIEVAL_BACKEND=rag_engine is 4.3's corpus as the retrieval stage - the mirror 12.5 keeps
+# (MANAGED_MIRROR), queried by text, its contexts mapped to the kit's chunks through the ledger; refused unless RESIDENCY=us
+# (the corpora are us-central1-only), so the deploy hands the API the residency and RAG_LOCATION. A candidate first:
+# make candidate RETRIEVAL_BACKEND=rag_engine, after make ablate ABLATE_ARGS="--arms all" has measured it.
 gcloud run deploy documind-api \
   --image=${REGION:-us-central1}-docker.pkg.dev/$PROJECT/documind/api:$GIT_SHA \
   --region=${REGION:-us-central1} --platform=managed \
@@ -42,7 +46,7 @@ gcloud run deploy documind-api \
   --min-instances=0 --max-instances=20 \
   --cpu-boost --execution-environment=gen2 \
   --service-account=documind-api-sa@$PROJECT.iam.gserviceaccount.com \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RETRIEVAL_BACKEND=${RETRIEVAL_BACKEND:-firestore}|VECTOR_INDEX_ENDPOINT=$VECTOR_INDEX_ENDPOINT|VECTOR_DEPLOYED_INDEX_ID=$VECTOR_DEPLOYED_INDEX_ID|SELF_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-ui,/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-chat|DEMO_MODE=${DEMO_MODE-1}|UPLOAD_BUCKET=$PROJECT-uploads|MEDIA_BUCKET=$PROJECT-media|AUDIT_BUCKET=$PROJECT-audit|GENERATOR_MODEL=${GENERATOR_MODEL-gemini-3.6-flash}|RAG_MODEL_BASE=${RAG_MODEL_BASE-gemini-3.6-flash}|ROUTING=${ROUTING-off}|BUDGET_USD=${BUDGET_USD-100}${SPEND_PCT:+|SPEND_PCT=$SPEND_PCT}|MODEL_BACKEND=${MODEL_BACKEND-vertex}|LITELLM_URL=https://documind-gateway-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|ARMOR=${ARMOR-off}|ARMOR_LOCATION=${ARMOR_LOCATION-asia-south1}|ARMOR_TEMPLATE=${ARMOR_TEMPLATE-documind-guard}|SEMANTIC_CACHE=${SEMANTIC_CACHE-off}|RETRIEVAL_CURRENT_ONLY=${RETRIEVAL_CURRENT_ONLY-off}|RETRIEVAL_GRAPH=${RETRIEVAL_GRAPH-off}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}|GIT_SHA=$GIT_SHA" \
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RETRIEVAL_BACKEND=${RETRIEVAL_BACKEND:-firestore}|VECTOR_INDEX_ENDPOINT=$VECTOR_INDEX_ENDPOINT|VECTOR_DEPLOYED_INDEX_ID=$VECTOR_DEPLOYED_INDEX_ID|SELF_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-ui,/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-chat|DEMO_MODE=${DEMO_MODE-1}|UPLOAD_BUCKET=$PROJECT-uploads|MEDIA_BUCKET=$PROJECT-media|AUDIT_BUCKET=$PROJECT-audit|GENERATOR_MODEL=${GENERATOR_MODEL-gemini-3.6-flash}|RAG_MODEL_BASE=${RAG_MODEL_BASE-gemini-3.6-flash}|ROUTING=${ROUTING-off}|BUDGET_USD=${BUDGET_USD-100}${SPEND_PCT:+|SPEND_PCT=$SPEND_PCT}|MODEL_BACKEND=${MODEL_BACKEND-vertex}|LITELLM_URL=https://documind-gateway-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|ARMOR=${ARMOR-off}|ARMOR_LOCATION=${ARMOR_LOCATION-asia-south1}|ARMOR_TEMPLATE=${ARMOR_TEMPLATE-documind-guard}|SEMANTIC_CACHE=${SEMANTIC_CACHE-off}|RETRIEVAL_CURRENT_ONLY=${RETRIEVAL_CURRENT_ONLY-off}|RETRIEVAL_GRAPH=${RETRIEVAL_GRAPH-off}|RESIDENCY=${RESIDENCY:-us}|RAG_LOCATION=${RAG_LOCATION-us-central1}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}|GIT_SHA=$GIT_SHA" \
   --vpc-connector=projects/$PROJECT/locations/${REGION:-us-central1}/connectors/documind-vpc \
   --vpc-egress=private-ranges-only
 

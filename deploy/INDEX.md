@@ -154,7 +154,7 @@ Lesson ids ending in `p` are practice labs.
 | `evals/manifest.json` | data | - | 10.1,10.2,10.5,11.5,12.1,12.7,2.3,4.2,4.2p,4.5,4.5p,4.7,9.3 |
 | `evals/paraphrases.jsonl` | data | - | 12.5 |
 | `evals/real_sources.json` | data | - | 12.7,4.1,4.1p,4.2,4.2p,4.3p,4.3,4.5,4.5p,9.1 |
-| `evals/required.json` | data | - | 10.1p,10.4p,10.6,12.1p,12.2p,12.2,12.4p,12.4,12.5,12.7,12.8,2.4p,4.7,5.3,5.5,6.1,6.1p,6.3,6.3p,6.4,7.1p,7.2p |
+| `evals/required.json` | data | - | 10.1p,10.4p,10.6,12.1p,12.2p,12.2,12.4p,12.4,12.5,12.7,12.8,2.4p,4.3,4.7,5.3,5.5,6.1,6.1p,6.3,6.3p,6.4,7.1p,7.2p |
 | `evals/sft/documind_sft_v1.chat.jsonl` | data | - | 10.5 |
 | `evals/sft/documind_sft_v1.manifest.json` | data | - | 10.1,10.5 |
 | `evals/sft/documind_sft_v1.vertex.jsonl` | data | - | 10.1 |

@@ -1,4 +1,4 @@
-import json, logging
+import hashlib, json, logging, re
 from functools import lru_cache
 from google.cloud import aiplatform
 from google.cloud.aiplatform.matching_engine.matching_engine_index_endpoint import Namespace
@@ -94,11 +94,131 @@ def prefer_current(chunks: list[dict]) -> list[dict]:
     Then one version per source: the newest-per-source guard closes the swap window on its own."""
     return newest_per_source([c for c in chunks if c.get("current") is not False])
 
+@lru_cache(maxsize=1)
+def _rag():
+    """vertexai.rag on the corpora's region (P9.4, 13 September 2026): serverless corpora are us-central1-only (4.3),
+    and this client never generates - generation stays on the global client the generator holds."""
+    import vertexai
+    from vertexai import rag
+    vertexai.init(project=settings.project_id, location=settings.rag_location)
+    return rag
+
+_corpora = {}          # tenant_id -> the corpus's resource name, once found
+
+def _rag_corpus(tenant_id: str) -> str | None:
+    """The tenant's corpus, by the mirror's name (documind-{tenant}, services/ingest/managed.py), found once and kept;
+    None while the tenant has none - looked up again on the next question, never created here."""
+    if tenant_id not in _corpora:
+        want = "documind-" + re.sub(r"[^a-z0-9-]+", "-", tenant_id.lower()).strip("-")
+        name = next((c.name for c in _rag().list_corpora() if c.display_name == want), None)
+        if name is None:
+            return None
+        _corpora[tenant_id] = name
+    return _corpora[tenant_id]
+
+def _version_row(tenant_id: str, doc_key: str) -> dict | None:
+    """What a managed context lacks, from the kit's own rows: the version's source_uri, doc_type, effective_from,
+    indexed_at - and `current`, read fresh, so a version the ledger retired while the store still held it is dropped
+    by prefer_current() like any retired row. One small read per distinct version in the pool."""
+    for snap in (_fs().collection(settings.chunks_collection).where("tenant_id", "==", tenant_id)
+                 .where("doc_key", "==", doc_key).limit(1).stream()):
+        d = snap.to_dict() or {}
+        return {k: d.get(k) for k in ("source_uri", "doc_type", "effective_from", "indexed_at", "reactivated_at", "current")}
+    return None
+
+def _page_span(ctx) -> str:
+    span = getattr(getattr(ctx, "chunk", None), "page_span", None)
+    first, last = getattr(span, "first_page", 0) or 0, getattr(span, "last_page", 0) or 0
+    return f"p{first}" + (f"-{last}" if last and last != first else "") if first else ""
+
+def _media_rows(vec: list[float], tenant_id: str, top_k: int, filters: dict | None = None) -> list[dict]:
+    """The kit's own figure and segment rows (Module 9), for a pool a managed backend served: a store holds text only
+    (the plan's D4), so media comes from Firestore's vector index under the tenant + kind index firestore_indexes.tf
+    declares. A doc_type filter is applied to the rows returned - the kind index carries no doc_type."""
+    query = _fs().collection(settings.chunks_collection).where("tenant_id", "==", tenant_id)
+    if settings.retrieval_current_only == "on":
+        query = query.where("current", "==", True)
+    if filters and filters.get("kind"):
+        query = query.where("kind", "==", filters["kind"])          # the caller named the kind: one equality, as the fallback does
+    else:
+        query = query.where("kind", "in", ["figure", "segment"])     # the media kinds a store never holds
+    hits = query.find_nearest("embedding", Vector(vec), distance_measure=DistanceMeasure.COSINE,
+                              limit=top_k, distance_result_field="d").get()
+    out = []
+    for h in hits:
+        d = h.to_dict()
+        if filters and filters.get("doc_type") and d.get("doc_type") != filters["doc_type"]:
+            continue
+        d["id"], d["score"] = h.id, 1.0 - d.pop("d", 1.0)
+        d.pop("embedding", None)
+        out.append(d)
+    return out
+
+def _managed_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
+                      vec: list[float] | None = None) -> list[dict]:
+    """RETRIEVAL_BACKEND=rag_engine (P9.4, 13 September 2026): lesson 4.3's corpus as the kit's retrieval stage, and
+    nothing more - the reranker, the packing, the generator and the citations stay the kit's (the plan's D1).
+
+    The tenant's corpus is the mirror's (services/ingest/managed.py: one per tenant, a RagFile per version named by
+    its doc_key, the version's own text), queried by text with 4.3's distance threshold. Each context comes back with
+    the RagFile's display name - the doc_key - and that is enough to make it a chunk of the kit's contract: the
+    version's row gives it source_uri, doc_type, effective_from, indexed_at and a fresh `current`; the id is stable
+    (tenant, doc_key, a hash of the text) so the answer cache and the citations hold; the score is 1 - distance,
+    the scale the Firestore path uses. A caller's filters apply to the mapped chunks as on every path; figure and
+    segment rows join from the kit's own index (D4), unless the caller asked for text alone. A tenant with no
+    corpus, or a store that will not answer, is the Firestore rung with the filters, logged rag_engine_fallback -
+    never an empty pool that reads as a refusal. RESIDENCY=india refuses this backend at startup (config.py)."""
+    kind = (filters or {}).get("kind")
+    if kind and kind != "text":                        # figures or segments only: the store has none, the index has them
+        return _media_rows(vec, tenant_id, settings.top_k_retrieve, filters)
+    corpus = _rag_corpus(tenant_id)
+    if corpus is None:
+        logging.warning(json.dumps({"event": "rag_engine_fallback", "tenant": tenant_id,
+                                    "reason": f"no corpus for the tenant: make rag-corpus TENANT={tenant_id}"}))
+        return _firestore_fallback(vec, tenant_id, settings.top_k_retrieve, filters)
+    try:
+        rag = _rag()
+        resp = rag.retrieval_query(
+            rag_resources=[rag.RagResource(rag_corpus=corpus)], text=query,
+            rag_retrieval_config=rag.RagRetrievalConfig(
+                top_k=settings.top_k_retrieve,
+                filter=rag.Filter(vector_distance_threshold=settings.rag_distance_threshold)))
+        contexts = list(resp.contexts.contexts)
+    except Exception as e:
+        logging.warning(json.dumps({"event": "rag_engine_fallback", "tenant": tenant_id, "error": str(e)[:200]}))
+        return _firestore_fallback(vec, tenant_id, settings.top_k_retrieve, filters)
+    rows: dict[str, dict | None] = {}
+    out = []
+    for ctx in contexts:
+        doc_key, text = getattr(ctx, "source_display_name", "") or "", getattr(ctx, "text", "") or ""
+        if not doc_key or not text.strip():
+            continue
+        if doc_key not in rows:
+            rows[doc_key] = _version_row(tenant_id, doc_key)
+        row = rows[doc_key]
+        if row is None:                                # a file the ledger does not know: never served
+            continue
+        chunk = {"id": f"{tenant_id}:{doc_key}#rag-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}",
+                 "text": text, "source_uri": row.get("source_uri") or "", "doc_key": doc_key,
+                 "doc_type": row.get("doc_type"), "kind": "text", "effective_from": row.get("effective_from"),
+                 "indexed_at": row.get("indexed_at"), "reactivated_at": row.get("reactivated_at"),
+                 "current": row.get("current"), "locator": _page_span(ctx),
+                 "score": max(0.0, 1.0 - float(getattr(ctx, "score", 0.0) or 0.0)), "found_by": "rag_engine"}
+        if any(chunk.get(k) != v for k, v in (filters or {}).items()):
+            continue
+        out.append(chunk)
+    if kind != "text":
+        out += _media_rows(vec, tenant_id, max(3, settings.top_k_retrieve // 4), filters)
+    return sorted(out, key=lambda c: -c["score"])[:settings.top_k_retrieve]
+
 def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
                     vec: list[float] | None = None) -> list[dict]:
-    """The dense pool: Vector Search (dense or hybrid) with the Firestore fallback beneath it, or Firestore's own
-    vector index on the lean profile - the same tenant / current / filter predicates on every path."""
+    """The dense pool: Vector Search (dense or hybrid) with the Firestore fallback beneath it, Firestore's own
+    vector index on the lean profile, or a managed store (rag_engine, P9.4) - the same tenant / current / filter
+    predicates on every path."""
     vec = vec if vec is not None else embed_query(query)    # main.py embeds once: the answer cache looked it up first
+    if settings.retrieval_backend == "rag_engine":
+        return prefer_current(_managed_retrieve(query, tenant_id, top_k, filters, vec=vec))
     if settings.retrieval_backend == "firestore":
         # The lean profile (deploy/README.md): no Vector Search endpoint exists, on purpose.
         # Firestore holds every embedding indexer.py wrote and its own vector index answers,

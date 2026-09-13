@@ -249,8 +249,12 @@ front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto`
 `MANAGED_MIRROR=rag_engine|vertex_search|both` copies every version the worker swaps current, as the text its rows
 hold, into the tenant's RAG Engine corpus (`make rag-engine-enable` once, `make rag-corpus TENANT=` per tenant)
 and / or Vertex AI Search data store (`managed.tf`, `MANAGED_SEARCH=true`), and takes a retired version out;
-`make managed-status` reads every store against the ledger. Off on the lane and refused unless `RESIDENCY=us`;
-the backends that read the stores are the plan's next rows.
+`make managed-status` reads every store against the ledger. Off on the lane and refused unless `RESIDENCY=us`.
+The API reads the corpus as `RETRIEVAL_BACKEND=rag_engine` (P9.4): the tenant's corpus queried by text, each
+context mapped to the kit's chunk contract through its version's row, the same reranker, packing and citations,
+figures and segments still from the kit's index, and the Firestore rung with the filters when a tenant has no
+corpus or the store will not answer (`rag_engine_fallback`). `make ablate ABLATE_ARGS="--arms all"` measures it
+from outside the API; `make candidate RETRIEVAL_BACKEND=rag_engine` judges it. The data store's backend is next.
 
 ---
 

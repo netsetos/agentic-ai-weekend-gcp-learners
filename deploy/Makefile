@@ -19,6 +19,7 @@
 #     make batch / queued / batch-job            the batch lane (13 September 2026): drain the queue now, list it, declare the job
 #     make graph TENANT=acme                     build the tenant's knowledge graph (4.6) for RETRIEVAL_GRAPH=on|auto
 #     make managed-status / rag-corpus TENANT=   the managed mirror (P9, 4.3 + 4.4): the stores against the ledger; a tenant's RAG Engine corpus
+#     make candidate RETRIEVAL_BACKEND=rag_engine  4.3's corpus as the API's retrieval stage (P9.4), judged on a candidate; make ablate ABLATE_ARGS="--arms all" first
 #     make rag-engine-enable                     once per project: RAG Engine in serverless mode + vectorsearch (4.3's one-time prep)
 #     make down  PROJECT=...                        the services, then terraform destroy; names what only project deletion removes
 #
@@ -508,7 +509,7 @@ tune: guard-project
 #   make eval-live API=https://candidate---documind-api-NUMBER.us-central1.run.app
 candidate: guard-project
 	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --no-traffic --tag candidate \
-	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
+	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)$(if $(RETRIEVAL_BACKEND),|RETRIEVAL_BACKEND=$(RETRIEVAL_BACKEND)|RAG_LOCATION=$(RAG_LOCATION)|RESIDENCY=$(RESIDENCY),)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
 	@$(MAKE) --no-print-directory record-candidate PROJECT=$(PROJECT) REGION=$(REGION)
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	echo ">> candidate: https://candidate---documind-api-$$NUMBER.$(REGION).run.app (no traffic; remove with gcloud run services update-traffic documind-api --remove-tags candidate)"
