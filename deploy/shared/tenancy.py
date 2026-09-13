@@ -126,6 +126,35 @@ def permits(policy: str, region: str | None) -> bool:
     return str(region or "").strip().lower().startswith(INDIA_REGION_PREFIXES)
 
 
+RETRIEVAL_BACKENDS = ("vector", "firestore", "rag_engine", "vertex_search")   # rag-api's config.RETRIEVAL_BACKENDS; the gate holds the two equal
+
+
+def backend_for(tenant_id: str, db=None) -> str | None:
+    """The tenant's retrieval_backend pin, or None for the deployment's default. Read by the operator's CLI; the API
+    reads the same field itself, once a minute, in main.py's choose_for."""
+    if not tenant_id:
+        return None
+    snap = (db or _db()).collection("tenant_settings").document(tenant_id).get()
+    return ((snap.to_dict() or {}) if snap.exists else {}).get("retrieval_backend") or None
+
+
+def set_backend(tenant_id: str, backend: str | None) -> str:
+    """The operator's write: tenant_settings/{tenant}.retrieval_backend, the way 11.4 pins a model - which store
+    answers this tenant (vector | firestore | rag_engine | vertex_search); `default` or None clears the pin. The pin
+    is held against the tenant's data_region on every request (an `in` tenant on a managed store is served from the
+    kit's index, policy_fallback=1 on the row), so it cannot move text the policy keeps home."""
+    from google.cloud import firestore
+    backend = (backend or "default").strip().lower()
+    ref = _db().collection("tenant_settings").document(tenant_id)
+    if backend == "default":
+        ref.set({"retrieval_backend": firestore.DELETE_FIELD, "retrieval_backend_set_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        return "default"
+    if backend not in RETRIEVAL_BACKENDS:
+        raise ValueError(f"retrieval_backend={backend!r}: one of {'|'.join(RETRIEVAL_BACKENDS)} or default")
+    ref.set({"retrieval_backend": backend, "retrieval_backend_set_at": firestore.SERVER_TIMESTAMP}, merge=True)
+    return backend
+
+
 def set_policy(tenant_id: str, region: str) -> str:
     """The operator's write: tenant_settings/{tenant}.data_region, the pin's other fields kept (merge). Refuses
     anything but in | any - a typo must not widen a tenant's region by falling through to a default."""
@@ -148,6 +177,8 @@ if __name__ == "__main__":
     l.add_argument("tenant")
     p = sub.add_parser("policy", help="where a tenant's text may be held: in | any (make tenant-policy); alone, print it")
     p.add_argument("tenant"); p.add_argument("region", nargs="?", choices=DATA_REGIONS)
+    b = sub.add_parser("backend", help="which store answers a tenant (make tenant-backend): vector | firestore | rag_engine | vertex_search | default; alone, print it")
+    b.add_argument("tenant"); b.add_argument("backend", nargs="?", choices=RETRIEVAL_BACKENDS + ("default",))
     args = ap.parse_args()
     if args.cmd == "add":
         add_member(args.tenant, args.email)
@@ -157,6 +188,11 @@ if __name__ == "__main__":
             print(f"{args.tenant}: data_region={set_policy(args.tenant, args.region)}")
         else:
             print(f"{args.tenant}: data_region={policy_for(args.tenant)}")
+    elif args.cmd == "backend":
+        if args.backend:
+            print(f"{args.tenant}: retrieval_backend={set_backend(args.tenant, args.backend)}")
+        else:
+            print(f"{args.tenant}: retrieval_backend={backend_for(args.tenant) or 'default (the deployment RETRIEVAL_BACKEND)'}")
     else:
         for m in list_members(args.tenant):
             print(m)

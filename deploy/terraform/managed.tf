@@ -26,8 +26,8 @@ variable "managed_mirror" {
 
 variable "tenants" {
   type        = list(string)
-  default     = ["acme", "zeta", "globex"] # the roster's three golden tenants (evals/golden.jsonl)
-  description = "the tenants a managed store is declared for; a tenant not listed gets mirror_no_store, never a store created on the fly"
+  default     = ["acme", "zeta"] # the tenants whose data_region is `any` (make roster): globex's text stays on the kit's rows
+  description = "the tenants a managed store is declared for (the `any` tenants; the Makefile's MANAGED_TENANTS names the same); a tenant not listed gets mirror_no_store, never a store created on the fly"
 }
 
 locals {

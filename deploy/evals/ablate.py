@@ -47,7 +47,7 @@ import statistics
 import sys
 import time
 
-ARM_KEYS = ("dense5", "dense20", "dense50", "hybrid", "rag_engine")
+ARM_KEYS = ("dense5", "dense20", "dense50", "hybrid", "rag_engine", "vertex_search")
 DEFAULT_ARMS = ("dense5", "dense20", "dense50", "hybrid")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -199,6 +199,29 @@ class Lane:
                         "source_uri": self.source_of(tenant, key) if key else ""})
         return out
 
+    def vertex_search(self, question: str, tenant: str, k: int) -> list:
+        """R4's backend from outside it: 4.4's data store (documind-{tenant}, managed.tf) searched by text through its
+        default serving config, each result's extractive segments - or its snippet - as chunks with the source the
+        ledger knows: what retriever._search_retrieve() serves, without the API. A tenant with no data store raises
+        (MANAGED_SEARCH=true make up declares one per `any` tenant), like the corpus arm."""
+        from google.cloud import discoveryengine_v1 as discoveryengine
+        client = discoveryengine.SearchServiceClient()
+        store = "documind-" + re.sub(r"[^a-z0-9-]+", "-", tenant.lower()).strip("-")
+        serving = (f"projects/{self.project}/locations/global/collections/default_collection/dataStores/{store}"
+                   f"/servingConfigs/default_search")
+        spec = discoveryengine.SearchRequest.ContentSearchSpec(
+            snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(return_snippet=True),
+            extractive_content_spec=discoveryengine.SearchRequest.ContentSearchSpec.ExtractiveContentSpec(max_extractive_segment_count=3))
+        out = []
+        for r in client.search(request=discoveryengine.SearchRequest(serving_config=serving, query=question, page_size=k, content_search_spec=spec)):
+            dd = discoveryengine.Document.to_dict(r.document).get("derived_struct_data") or {}
+            texts = [str(s.get("content") or "") for s in (dd.get("extractive_segments") or [])] or \
+                    [re.sub(r"<[^>]+>", "", str(s.get("snippet") or "")) for s in (dd.get("snippets") or [])]
+            for i, text in enumerate(t for t in texts if t.strip()):
+                out.append({"chunk_id": f"{tenant}:{r.document.id}#vs-{len(out)}", "text": text,
+                            "source_uri": self.source_of(tenant, r.document.id)})
+        return out[:k]
+
     def rerank(self, question: str, chunks: list, top_n: int = 5) -> list:
         from google.cloud import discoveryengine_v1 as discoveryengine
         if not chunks:
@@ -218,6 +241,7 @@ def arms(lane: Lane, keys=DEFAULT_ARMS) -> list:
         "dense50": ("dense 50 -> rerank 5", lambda q, t: lane.dense(q, t, 50), True),
         "hybrid": ("hybrid 20 -> rerank 5  (4.5, not wired)", lambda q, t: lane.hybrid(q, t, 20), True),
         "rag_engine": ("rag_engine 20 -> rerank 5  (4.3's corpus, P9.4)", lambda q, t: lane.rag_engine(q, t, 20), True),
+        "vertex_search": ("vertex_search 20 -> rerank 5  (4.4's data store, R4)", lambda q, t: lane.vertex_search(q, t, 20), True),
     }
     return [every[k] for k in keys]
 

@@ -9,6 +9,7 @@
 #     make plan  PROJECT=documind-ai-live-0910     terraform dry run (creates nothing)
 #     make up    PROJECT=...                        apply, build + deploy the services, seed the roster
 #     make tenant-policy TENANT= DATA_REGION=in|any   where a tenant's text may be held (13 September 2026): in = the kit's rows only; any = the managed stores too
+#     make tenant-backend TENANT= RETRIEVAL_BACKEND=  which store answers one tenant (vector | firestore | rag_engine | vertex_search | default); full's make up pins acme and zeta
 #     make media [MEDIA_ARGS=--video]              the corpus's figures (and the town hall video) under evals/corpus/
 #     make ingest-corpus PROJECT=...                the corpus into the uploads bucket, one prefix per tenant
 #     make smoke DOCUMIND_API_URL=https://...       end-to-end smoke test
@@ -107,9 +108,20 @@ RETRIEVAL_GRAPH ?= off
 # vertex_search backends. MANAGED_MIRROR is the worker's, the batch job's and the walk's switch (off | rag_engine |
 # vertex_search | both) - the deployment's capability list; which TENANTS may be mirrored is each tenant's data_region
 # (make tenant-policy, 13 September 2026 evening). MANAGED_SEARCH=true declares the data stores (managed.tf);
-# RAG_LOCATION is the corpora's region (serverless: us-central1 only). Off on the lane; a candidate judges them.
+# RAG_LOCATION is the corpora's region (serverless: us-central1 only). Off on the lean lane; ON on the full profile
+# (13 September 2026, evening): both stores, the corpora created by make up (managed-stores), acme pinned to
+# rag_engine and zeta to vertex_search - every managed piece the course teaches runs there, and a candidate is
+# still how a backend is judged before it becomes a deployment's default.
+ifeq ($(PROFILE),full)
+MANAGED_MIRROR  ?= both
+MANAGED_SEARCH  ?= true
+else
 MANAGED_MIRROR  ?= off
 MANAGED_SEARCH  ?= false
+endif
+# the tenants whose data_region is `any` (make roster): a RAG Engine corpus each on the full profile, the pins,
+# and managed.tf's `tenants` default (the data stores declared) names the same two - globex's text stays home
+MANAGED_TENANTS ?= acme zeta
 RAG_LOCATION    ?= us-central1
 # 12 September 2026 (deploy/INDEXING.md): the retention window a retired chunk row lives for (the TTL policy's
 # number, variables.tf), the ONE declared embedding both the worker and the API run (variables.tf), and the ingest
@@ -183,7 +195,8 @@ SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-
         gpu-quota gpu-cap gpu-cap-off off off-now \
         release-candidate record-candidate promote rollback smoke-all usage ingest-one poison dlq down-services \
         reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex \
-        batch queued batch-job graph managed-status rag-corpus rag-engine-enable tenant-policy
+        batch queued batch-job graph managed-status rag-corpus rag-engine-enable tenant-policy tenant-backend \
+        managed-stores managed-stores-down
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -252,7 +265,7 @@ up: guard-project extract adopt-firestore
 	cd $(TF_DIR) && $(TF_INIT) && \
 	  terraform apply -input=false -auto-approve $(TF_VARS)
 	$(MAKE) drift secrets build deploy-services wait-index roster
-	@if [ "$(PROFILE)" = full ]; then $(MAKE) bq-views; fi
+	@if [ "$(PROFILE)" = full ]; then $(MAKE) managed-stores && $(MAKE) bq-views; fi
 
 # After an apply, a plan should be EMPTY. A resource that is still "to be replaced" is one the
 # provider reads back differently from how it was written - which is how both vector indexes
@@ -594,12 +607,13 @@ chat-local:
 # cannot go while they use it. Then what only deleting the project removes, printed whether or not destroy got
 # through - a used lab's buckets hold objects and force_destroy is false, so destroy stops on them and says so.
 down: guard-project down-services
+	@if [ "$(PROFILE)" = full ]; then $(MAKE) managed-stores-down; fi
 	@rc=0; (cd $(TF_DIR) && $(TF_INIT) && terraform destroy -input=false -auto-approve $(TF_VARS)) || rc=$$?; \
 	echo ">> make down cannot remove these; only deleting the project does:"; \
 	echo ">>   Firestore (default): delete_protection_state = DELETE_PROTECTION_ENABLED (firestore.tf) - chunks, ledger, rosters stay"; \
 	echo ">>   buckets that hold objects: uploads, datasets, audit (force_destroy = false, storage.tf) - and on the full profile the audit bucket's LOCKED retention policy blocks even the project's deletion for five years, by design"; \
 	echo ">>   a tuned endpoint from make tune (evals/tune.py: Vertex AI, not Terraform)"; \
-	echo ">>   a RAG Engine corpus from make rag-corpus (managed.py: Vertex AI, not Terraform) - it bills storage until deleted: gcloud ai rag-corpora ... or 4.3's cleanup cell"; \
+	echo ">>   a RAG Engine corpus from make rag-corpus on the LEAN profile (managed.py: Vertex AI, not Terraform) - it bills storage until deleted: make managed-stores-down, gcloud ai rag-corpora ... or 4.3's cleanup cell (on full, make down just deleted MANAGED_TENANTS' corpora)"; \
 	echo ">>   the BigQuery views make bq-views applied (terraform/sql/*.sql, through bq, not Terraform)"; \
 	echo ">> Delete the throwaway project to stop all billing:"; \
 	echo ">>   gcloud projects delete $(PROJECT)"; exit $$rc
@@ -945,6 +959,37 @@ rag-corpus: guard-project
 managed-status: guard-project
 	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit \
 	  $(PY) managed.py --project $(PROJECT) --status --mode $(if $(filter off,$(MANAGED_MIRROR)),both,$(MANAGED_MIRROR)) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),)
+
+# The managed stores, all of them, on the full profile (13 September 2026, evening): make up runs this after the
+# roster (the policies are set) and before the first ingest - the mirror never creates a store, and a version
+# ingested before its corpus exists waits for the walk's repair (the plan's R6). RAG Engine in serverless mode
+# once, a corpus per `any` tenant (idempotent by name), the data stores already declared by managed.tf
+# (MANAGED_SEARCH=true on full); then the demo's pins, so one deployment answers from all three stores: acme from
+# 4.3's corpus, zeta from 4.4's data store, globex (data_region in) from the kit's own rows. Safe to re-run.
+managed-stores: guard-project
+	$(MAKE) rag-engine-enable
+	@for t in $(MANAGED_TENANTS); do $(MAKE) rag-corpus TENANT=$$t || exit 1; done
+	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend acme rag_engine
+	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend zeta vertex_search
+	@echo ">> managed stores ready: corpora for $(MANAGED_TENANTS); acme reads rag_engine, zeta vertex_search, globex the kit's rows; make managed-status after make ingest-corpus"
+
+# The corpora bill storage until deleted and are not Terraform's to destroy: make down runs this first on full.
+# The data stores go with terraform destroy. The pins are cleared so a lean redeploy of the same project does not
+# send acme and zeta to stores that no longer exist.
+managed-stores-down: guard-project
+	@for t in $(MANAGED_TENANTS); do \
+	  (cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) $(PY) managed.py --project $(PROJECT) --delete-corpus --tenant $$t) || exit 1; \
+	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend $$t default; \
+	done
+
+# Which store answers ONE tenant's questions: tenant_settings/{TENANT}.retrieval_backend (shared/tenancy.py), the
+# way 11.4 pins a model. vector | firestore | rag_engine | vertex_search; `default` clears the pin; empty prints it.
+# Held against the tenant's data_region on every request (rag-api main.py: an `in` tenant pinned to a managed
+# store is served from the kit's index with policy_fallback=1 on the row), so a pin cannot move text the policy
+# keeps home. Read once a minute per tenant - no redeploy.
+tenant-backend: guard-project
+	@test -n "$(TENANT)" || (echo "TENANT=<id> is required"; exit 2); \
+	GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend $(TENANT) $(RETRIEVAL_BACKEND)
 
 # ---------- 4.6's graph, on the lane (13 September 2026) ----------
 # services/ingest/graph.py: the tenant's current chunks through the lesson's extraction, resolution and build, written

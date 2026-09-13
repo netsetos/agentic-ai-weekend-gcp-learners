@@ -212,16 +212,112 @@ def _managed_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | No
         out += _media_rows(vec, tenant_id, max(3, settings.top_k_retrieve // 4), filters)
     return sorted(out, key=lambda c: -c["score"])[:settings.top_k_retrieve]
 
+@lru_cache(maxsize=1)
+def _search():
+    """The Vertex AI Search client (R4, 13 September 2026 evening): one per process. The data stores are global
+    (managed.tf), so no region is chosen here; the client's default endpoint serves them."""
+    return discoveryengine.SearchServiceClient()
+
+def _search_serving_config(tenant_id: str) -> str:
+    """The tenant's data store, by the mirror's id (documind-{tenant}: services/ingest/managed.py's store_id, the same
+    regex), searched through its default serving config the way 4.4's notebook searches it - no engine needed."""
+    store = "documind-" + re.sub(r"[^a-z0-9-]+", "-", tenant_id.lower()).strip("-")
+    return (f"projects/{settings.project_id}/locations/{settings.search_location}/collections/default_collection"
+            f"/dataStores/{store}/servingConfigs/default_search")
+
+def _search_filter(filters: dict | None) -> str:
+    """The caller's filters as a Vertex AI Search filter expression on the schema's indexable fields (managed.tf):
+    doc_type: ANY("policy"). `kind` never reaches the store - it holds text only (D4): a media kind is answered from
+    the kit's index before the store is asked, and text is what every document there is."""
+    return " AND ".join(f'{k}: ANY("{str(v).replace(chr(34), chr(92) + chr(34))}")' for k, v in (filters or {}).items() if k != "kind")
+
+def _search_texts(doc) -> list[tuple[str, str]]:
+    """What the store extracted for one result: its extractive segments (content, pageNumber) when it serves them, else
+    its snippet with the markup stripped - the field 4.4's cell reads; nothing for a document with neither."""
+    dd = ((discoveryengine.Document.to_dict(doc).get("derived_struct_data") or {}) if hasattr(discoveryengine.Document, "to_dict")
+          else dict(getattr(doc, "derived_struct_data", None) or {}))
+    out = []
+    for seg in dd.get("extractive_segments") or []:
+        text = str(seg.get("content") or "").strip()
+        if text:
+            out.append((text, str(seg.get("pageNumber") or "")))
+    if not out:
+        for snip in dd.get("snippets") or []:
+            text = re.sub(r"<[^>]+>", "", str(snip.get("snippet") or "")).strip()
+            if text:
+                out.append((text, ""))
+    return out
+
+def _search_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
+                     vec: list[float] | None = None) -> list[dict]:
+    """RETRIEVAL_BACKEND=vertex_search (R4, 13 September 2026 evening): lesson 4.4's data store as the kit's retrieval
+    stage, to the same contract as rag_engine (the plan's D1) - the store ranks, the kit reranks, packs, generates
+    and cites.
+
+    The tenant's data store is the mirror's (managed.tf; services/ingest/managed.py: one Document per current version,
+    its id the doc_key, its content the version's text), searched by text through its default serving config as
+    4.4's notebook searches it. Each result is the version's text as the store extracted it - extractive segments
+    when it serves them, else the snippet - one chunk each, mapped to the kit's chunk contract through the version's
+    own row (source_uri, doc_type, effective_from, a fresh `current`); the id is stable (tenant, doc_key, a hash of
+    the text), the score is the rank (Vertex AI Search orders, it does not score: 1.0, 0.99, ... until the reranker
+    orders the pool), found_by vertex_search. The caller's doc_type goes to the store as a filter expression on its
+    structData and is applied once more to the mapped chunks; figures and segments join from the kit's own index
+    (D4) unless the caller asked for text alone. No results is an empty pool - the store answered. A tenant with no
+    data store, or a store that will not answer, is the Firestore rung with the filters, logged vertex_search_fallback."""
+    kind = (filters or {}).get("kind")
+    if kind and kind != "text":                        # figures or segments only: the store has none, the index has them
+        return _media_rows(vec, tenant_id, settings.top_k_retrieve, filters)
+    try:
+        spec = discoveryengine.SearchRequest.ContentSearchSpec(
+            snippet_spec=discoveryengine.SearchRequest.ContentSearchSpec.SnippetSpec(return_snippet=True),
+            extractive_content_spec=discoveryengine.SearchRequest.ContentSearchSpec.ExtractiveContentSpec(
+                max_extractive_segment_count=settings.search_segments))
+        results = list(_search().search(request=discoveryengine.SearchRequest(
+            serving_config=_search_serving_config(tenant_id), query=query, page_size=settings.top_k_retrieve,
+            filter=_search_filter(filters), content_search_spec=spec)))
+    except Exception as e:
+        logging.warning(json.dumps({"event": "vertex_search_fallback", "tenant": tenant_id, "error": str(e)[:200],
+                                    "hint": "no data store for the tenant (MANAGED_SEARCH=true make up declares one per `any` tenant), or the store did not answer"}))
+        return _firestore_fallback(vec, tenant_id, settings.top_k_retrieve, filters)
+    rows: dict[str, dict | None] = {}
+    out, rank = [], 0
+    for r in results:
+        doc = getattr(r, "document", None)
+        doc_key = (getattr(doc, "id", "") or "") if doc is not None else ""
+        if not doc_key:
+            continue
+        if doc_key not in rows:
+            rows[doc_key] = _version_row(tenant_id, doc_key)
+        row = rows[doc_key]
+        if row is None:                                # a document the ledger does not know: never served
+            continue
+        for text, page in _search_texts(doc):
+            chunk = {"id": f"{tenant_id}:{doc_key}#vs-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:12]}",
+                     "text": text, "source_uri": row.get("source_uri") or "", "doc_key": doc_key,
+                     "doc_type": row.get("doc_type"), "kind": "text", "effective_from": row.get("effective_from"),
+                     "indexed_at": row.get("indexed_at"), "reactivated_at": row.get("reactivated_at"),
+                     "current": row.get("current"), "locator": f"p{page}" if page else "",
+                     "score": max(0.0, 1.0 - rank / 100), "found_by": "vertex_search"}
+            rank += 1
+            if any(chunk.get(k) != v for k, v in (filters or {}).items()):
+                continue
+            out.append(chunk)
+    if kind != "text":
+        out += _media_rows(vec, tenant_id, max(3, settings.top_k_retrieve // 4), filters)
+    return sorted(out, key=lambda c: -c["score"])[:settings.top_k_retrieve]
+
 def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
                     vec: list[float] | None = None, backend: str | None = None) -> list[dict]:
     """The dense pool: Vector Search (dense or hybrid) with the Firestore fallback beneath it, Firestore's own
-    vector index on the lean profile, or a managed store (rag_engine, P9.4) - the same tenant / current / filter
-    predicates on every path. `backend` is the one main.py chose for THIS request (the tenant's pin, held against
+    vector index on the lean profile, or a managed store (rag_engine, P9.4; vertex_search, R4) - the same tenant /
+    current / filter predicates on every path. `backend` is the one main.py chose for THIS request (the tenant's pin, held against
     its data_region - 13 September 2026, evening); the deployment's RETRIEVAL_BACKEND when the caller names none."""
     backend = backend or settings.retrieval_backend
     vec = vec if vec is not None else embed_query(query)    # main.py embeds once: the answer cache looked it up first
     if backend == "rag_engine":
         return prefer_current(_managed_retrieve(query, tenant_id, top_k, filters, vec=vec))
+    if backend == "vertex_search":
+        return prefer_current(_search_retrieve(query, tenant_id, top_k, filters, vec=vec))
     if backend == "firestore":
         # The lean profile (deploy/README.md): no Vector Search endpoint exists, on purpose.
         # Firestore holds every embedding indexer.py wrote and its own vector index answers,

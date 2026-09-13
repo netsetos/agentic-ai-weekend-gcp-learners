@@ -284,7 +284,7 @@ def version():
             "generator_model": settings.generator_model,
             "prompt": f"{settings.prompt_id}@{settings.prompt_version}",
             "retrieval_mode": settings.retrieval_mode,
-            "retrieval_backend": settings.retrieval_backend,   # vector | firestore | rag_engine (P9.4): the DEFAULT; a tenant's pin and its data_region decide per request (the row's retrieval_backend is the effective one)
+            "retrieval_backend": settings.retrieval_backend,   # vector | firestore | rag_engine | vertex_search: the DEFAULT; a tenant's pin and its data_region decide per request (the row's retrieval_backend is the effective one)
             "retrieval_graph": settings.retrieval_graph,   # 4.6's graph: off | on | auto (13 September 2026)
             # 12 September 2026: the embedding the query vector comes from - the same pair the worker stamps on
             # every row - and whether the ledger's pre-filter is on. A reindex that "changed nothing" and a
@@ -326,12 +326,14 @@ def sources(tenant_id: str, user=Depends(verify_iap)):
 def ready():
     # Lazy-init resource probes keep cold start fast; only warm when ready is probed
     from config import settings
-    from retriever import _genai_client, _index_endpoint, _fs, _rag
+    from retriever import _genai_client, _index_endpoint, _fs, _rag, _search
     _ = _genai_client(); _ = _fs()
     if settings.retrieval_backend == "vector":      # the lean profile has no endpoint to warm
         _ = _index_endpoint()
     elif settings.retrieval_backend == "rag_engine":   # P9.4: vertexai's init, before the first question pays for it
         _ = _rag()
+    elif settings.retrieval_backend == "vertex_search":   # R4: the search client, likewise
+        _ = _search()
     return {"status": "ready"}
 
 def _guard():
@@ -379,7 +381,7 @@ def query(req: QueryRequest, user=Depends(verify_iap)):
         chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec, backend=rbackend)
     stages["pool"] = len(chunks)                          # what the reranker sees: TOP_K_RETRIEVE, as served
     stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")   # 4.6's walk, counted
-    stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") == "rag_engine")   # P9.4: the store's share of the pool
+    stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") in MANAGED_BACKENDS)   # P9.4 / R4: the store's share of the pool
     if hit:
         ans = hit                                         # served from answer_cache: no reranker, no model
         stages["rerank_ms"] = stages["generate_ms"] = 0
@@ -436,7 +438,7 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
         chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec, backend=rbackend)
         stages["retrieve_ms"], stages["pool"] = _ms(tick), len(chunks)
         stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")
-        stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") == "rag_engine")
+        stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") in MANAGED_BACKENDS)
         tick = time.perf_counter()
         if chunks:                                   # a hit brought none; an empty pool has nothing to rank
             chunks = rerank(req.query, chunks, req.top_k, tenant_id=req.tenant_id)

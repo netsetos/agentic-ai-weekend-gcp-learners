@@ -98,7 +98,13 @@ with the Ranking API rerank; nothing bills by the hour while idle.
 tier, `retrieval_mode=hybrid`), the Spanner Graph trial, the Cloud SQL checkpointer, GKE, the
 BigQuery mirror and Dataplex scan, the log sink, Cloud Deploy - and the admin and chat
 services. Same Terraform, `count = local.full ? 1 : 0` on the difference (`variables.tf`);
-flip the variable and apply again.
+flip the variable and apply again. Since 13 September 2026 (evening) full also runs the managed
+stores of 4.3 and 4.4, so a full deployment answers from every store the course teaches:
+`MANAGED_MIRROR=both` and `MANAGED_SEARCH=true` are its defaults, `make up` switches RAG Engine
+to serverless mode, creates a corpus for every `any` tenant and pins acme to `rag_engine` and
+zeta to `vertex_search` (`make managed-stores`, after the roster), and `make down` deletes the
+corpora that would bill storage (`make managed-stores-down`). On lean the same targets exist
+and stay off; `make tenant-backend TENANT= RETRIEVAL_BACKEND=` moves one tenant by hand.
 
 Since Modules 7 and 8 joined the lane (September 2026) both profiles also deploy the agent
 surfaces: `documind-mcp` (7.2, the lane's tools over MCP with the kit's identity rules),
@@ -249,7 +255,8 @@ front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto`
 `MANAGED_MIRROR=rag_engine|vertex_search|both` copies every version the worker swaps current, as the text its rows
 hold, into the tenant's RAG Engine corpus (`make rag-engine-enable` once, `make rag-corpus TENANT=` per tenant)
 and / or Vertex AI Search data store (`managed.tf`, `MANAGED_SEARCH=true`), and takes a retired version out;
-`make managed-status` reads every store against the ledger. Off on the lane. Which *tenants* are mirrored is each
+`make managed-status` reads every store against the ledger. Off on the lean lane, on by default on the full profile
+(*Two profiles*, above). Which *tenants* are mirrored is each
 tenant's `data_region` policy (13 September 2026, evening: `tenant_settings/{tenant}`, `make tenant-policy TENANT=
 DATA_REGION=in|any`, `shared/tenancy.py`; absent is `in`): `make roster` sets `acme` and `zeta` to `any` and
 `globex` to `in`, so one deployment shows both - a forbidden store is skipped once per tenant and said so, a
@@ -258,7 +265,12 @@ each version is held (`mirrored`).
 The API reads the corpus as `RETRIEVAL_BACKEND=rag_engine` (P9.4): the tenant's corpus queried by text, each
 context mapped to the kit's chunk contract through its version's row, the same reranker, packing and citations,
 figures and segments still from the kit's index, and the Firestore rung with the filters when a tenant has no
-corpus or the store will not answer (`rag_engine_fallback`). `RETRIEVAL_BACKEND` is the deployment's default: a
+corpus or the store will not answer (`rag_engine_fallback`). `RETRIEVAL_BACKEND=vertex_search` (R4, 13 September
+2026 evening) reads 4.4's data store the same way: the tenant's store searched by text through its default serving
+config as the lesson's notebook does, each extractive segment - or the snippet, when the store serves none - a chunk
+of the contract through its version's row, the caller's `doc_type` as a filter expression on the store's structData,
+media from the kit's index, the Firestore rung on no store or an error (`vertex_search_fallback`). `RETRIEVAL_BACKEND`
+is the deployment's default: a
 tenant's `tenant_settings.retrieval_backend` pins its store, and its `data_region` decides whether a managed store
 may serve it at all - a managed backend for an `in` tenant is the kit's own index with `policy_fallback=1` on the
 usage row (never the store, never a 500), and the row's `retrieval_backend` is the one that served. `make ablate

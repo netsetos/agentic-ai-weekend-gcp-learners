@@ -1,8 +1,8 @@
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-RETRIEVAL_BACKENDS = ("vector", "firestore", "rag_engine")   # rag_engine: 4.3's corpus as the retrieval stage (P9.4, 13 September 2026)
-MANAGED_BACKENDS = ("rag_engine",)           # embed and search on their own terms, outside asia-south1
+RETRIEVAL_BACKENDS = ("vector", "firestore", "rag_engine", "vertex_search")   # rag_engine: 4.3's corpus (P9.4); vertex_search: 4.4's data store (R4) - each as the retrieval stage
+MANAGED_BACKENDS = ("rag_engine", "vertex_search")   # embed and search on their own terms, outside India: a tenant's data_region decides per request
 RETRIEVAL_MODES = ("dense", "hybrid")
 GRAPH_MODES = ("off", "on", "auto")          # 4.6's graph on the lane (13 September 2026, shared/documind_graph.py)
 
@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # kit's own index with policy_fallback=1 on the row (main.py's choose_for and retrieval_backend_for).
     rag_location: str = Field("us-central1", alias="RAG_LOCATION")
     rag_distance_threshold: float = Field(0.5, alias="RAG_DISTANCE_THRESHOLD")
+    # R4 (13 September 2026, evening): 4.4's data stores are global (managed.tf), searched through their default serving
+    # config as the lesson's notebook does; the extractive segments asked per result (a plain data store answers with
+    # snippets, an Enterprise engine with segments - the backend takes whichever came).
+    search_location: str = Field("global", alias="SEARCH_LOCATION")
+    search_segments: int = Field(3, alias="SEARCH_SEGMENTS")
     # The ledger (12.5, 11 September 2026): `on` retrieves only chunks the ledger marks current - one
     # version per document. Off until the second vector index is built and the chunks written before
     # the ledger carry the field (make backfill-current); a switch, judged on a candidate like the others.

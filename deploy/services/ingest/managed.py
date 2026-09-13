@@ -5,6 +5,7 @@ vertex_search retrieval backends read (P9.4, P9.5).
 
     python managed.py --project P --status [--tenant acme]          # each tenant, each store, held against the ledger (make managed-status)
     python managed.py --project P --create-corpus --tenant acme     # the tenant's RAG Engine corpus, once, by name (make rag-corpus)
+    python managed.py --project P --delete-corpus --tenant acme     # and gone, with its files (make managed-stores-down; it bills storage until then)
 
 The rule (managed-retrieval-plan-2026-09-13.md, D3): the ledger is the source of truth and a store holds current
 versions only. The worker calls after_swap() once swap_versions() has made a version current - with the text it
@@ -126,6 +127,18 @@ class RagEngineStore:
                               backend_config=rag.RagVectorDbConfig(rag_embedding_model_config=emb))
         self._corpora[tenant_id] = c.name
         return c.name
+
+    def delete_corpus(self, tenant_id: str) -> str | None:
+        """The tenant's corpus and every file in it, by display name; None when there is none. The one call that
+        stops a corpus billing storage (make managed-stores-down on the full profile, make down's note on lean)."""
+        rag = self.rag()
+        want = store_id(tenant_id)
+        name = next((c.name for c in rag.list_corpora() if c.display_name == want), None)
+        if name is None:
+            return None
+        rag.delete_corpus(name=name, force=True)
+        self._corpora.pop(tenant_id, None)
+        return name
 
     def _files(self, corpus_name: str, doc_key: str) -> list:
         return [f for f in self.rag().list_files(corpus_name) if f.display_name == doc_key]
@@ -442,6 +455,7 @@ def main() -> int:
     ap.add_argument("--tenant")
     ap.add_argument("--status", action="store_true", help="each tenant, each store, against the ledger")
     ap.add_argument("--create-corpus", action="store_true", help="the tenant's RAG Engine corpus, once (needs --tenant)")
+    ap.add_argument("--delete-corpus", action="store_true", help="the tenant's RAG Engine corpus and its files, gone (needs --tenant)")
     ap.add_argument("--mode", default=os.environ.get("MANAGED_MIRROR") or "both",
                     help="which stores --status reads: rag_engine | vertex_search | both")
     args = ap.parse_args()
@@ -456,6 +470,12 @@ def main() -> int:
         print(json.dumps({"event": "rag_corpus_ready", "tenant": args.tenant, "corpus": name,
                           "note": "one corpus per tenant, found by name; RAG Engine storage bills while it exists - make down names it"}))
         return 0
+    if args.delete_corpus:
+        if not args.tenant:
+            ap.error("--delete-corpus needs --tenant")
+        name = RagEngineStore(args.project, os.environ.get("RAG_LOCATION", "us-central1")).delete_corpus(args.tenant)
+        print(json.dumps({"event": "rag_corpus_deleted" if name else "rag_corpus_absent", "tenant": args.tenant, "corpus": name}))
+        return 0
     if args.status:
         from google.cloud import firestore
         db = firestore.Client(project=args.project)
@@ -465,7 +485,7 @@ def main() -> int:
         for line in status(db, mirror.stores, args.tenant):
             print(json.dumps(line))
         return 0
-    ap.error("one of --status, --create-corpus")
+    ap.error("one of --status, --create-corpus, --delete-corpus")
     return 2
 
 
