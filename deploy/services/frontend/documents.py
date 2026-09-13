@@ -48,10 +48,19 @@ def embed_batch(chunks):
             c["embedding"] = e.values
     return chunks
 
+def _held_in(row: dict) -> str:
+    """Where a version is held: the managed stores that confirmed it, with the region each holds it in (`mirrored`, the
+    worker's stamp on the ledger row) - or the kit's own rows alone, which is every version of an `in` tenant."""
+    held = row.get("mirrored") or {}
+    return ", ".join(f"{store} ({region})" for store, region in sorted(held.items())) or "kit rows"
+
+
 def versions_section(tenant_id: str) -> None:
     """The versions view (12 September 2026): GET /v1/sources - the tenant's ledger, as the API serves it. Which
     version of every document is current, what the last reindex cost (chunks reused by hash, embedded, retired),
-    the date a document declares, when it landed. Rendered, never queried here: the page holds no Firestore
+    the date a document declares, when it landed - and, since 13 September 2026 (evening), where each version is HELD:
+    the managed stores that confirmed it (the worker's mirror stamps `mirrored` on the ledger row) beside the tenant's
+    data_region, the policy those copies were judged under. Rendered, never queried here: the page holds no Firestore
     credential for the ledger, the API checks the roster, and the same rows are `make sources TENANT=`."""
     st.subheader("Versions")
     try:
@@ -70,11 +79,14 @@ def versions_section(tenant_id: str) -> None:
     if not rows:
         st.info("No documents indexed for this tenant yet.")
         return
+    region = body.get("data_region") or "in"
     st.caption(f"{body.get('versions') or len(rows)} current versions - corpus fingerprint {body.get('fingerprint') or 'none yet'}"
-               f" (last change: {body.get('last_event') or '-'})")
+               f" (last change: {body.get('last_event') or '-'}) - data_region {region}: "
+               + ("the managed stores may hold copies" if region == "any" else "the kit's own rows only"))
     st.dataframe([{"document": r_["name"], "status": r_["status"], "chunks": r_["chunks"], "reused": r_["reused"],
                    "embedded": r_["embedded"], "retired": r_["retired"], "effective from": r_["effective_from"] or "",
-                   "embedding": r_["embedding"], "indexed": (r_["indexed_at"] or "")[:19].replace("T", " ")}
+                   "embedding": r_["embedding"], "indexed": (r_["indexed_at"] or "")[:19].replace("T", " "),
+                   "held in": _held_in(r_)}
                   for r_ in rows], use_container_width=True)
     st.caption("A re-issued document keeps its name: the worker retires the previous version (never deletes it), reuses "
                "every chunk whose text did not change, and the retired rows expire by policy after the retention window.")

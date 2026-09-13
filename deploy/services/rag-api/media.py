@@ -93,7 +93,8 @@ def _usage(tenant_id: str, email: str, cost_usd: float, cached: bool, latency_ms
             # its whole latency is the generate stage - so tenant_daily's p95 per stage holds for modality=image too.
             "retrieve_ms": 0, "rerank_ms": 0, "generate_ms": latency_ms, "pool": 0, "rerank_fallback": 0,
             "confidence": "high", "model_backend": "vertex", "prompt_version": "media-v1",
-            "retrieval_mode": "none", "brain": "ui"}
+            # no retrieval either (13 September 2026): no store served, no managed share, no policy fallback
+            "retrieval_mode": "none", "retrieval_backend": "none", "managed_chunks": 0, "policy_fallback": 0, "brain": "ui"}
 
 
 @router.post("/generate")

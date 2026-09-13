@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     # fallback beneath it (the chaos rung). `firestore` - the kit's lean profile - is
     # Firestore's own vector index alone: no endpoint to keep warm, the same tenant
     # pre-filter, the ANN tier left out. Nothing else in the service changes.
-    retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore | rag_engine (P9.4): the DEFAULT
+    retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore | rag_engine | vertex_search (P9.4, R4): the DEFAULT
     # P9.4 (13 September 2026): the corpora's region (serverless RAG Engine: us-central1 only) and 4.3's cosine-distance
     # threshold on a context. RETRIEVAL_BACKEND is the deployment's default since the evening of that day: the same
     # tenant_settings/{tenant} document that pins a tenant's model (11.4) may pin its retrieval_backend, and its

@@ -10,6 +10,11 @@ SELECT
   jsonPayload.prompt_version AS prompt_version,
   jsonPayload.retrieval_mode AS retrieval_mode,
   jsonPayload.modality AS modality,
+  -- Which store served the pool (13 September 2026, evening): vector | firestore | rag_engine | vertex_search - the
+  -- EFFECTIVE backend per request (a tenant's pin, or the kit's index after the data-region fallback), so cost per
+  -- backend is this GROUP BY and not an estimate. The same typing rule as the stage clocks below: run make bq-views
+  -- after an API that logs retrieval_backend, managed_chunks and policy_fallback has answered once.
+  jsonPayload.retrieval_backend AS retrieval_backend,
   COUNT(*) AS queries,
   COUNTIF(jsonPayload.answerable = false) AS unanswerable,
   SUM(CAST(jsonPayload.tokens_in  AS INT64)) AS tokens_in,
@@ -30,6 +35,10 @@ SELECT
   -- The Ranking API stood in for by the retrieval order (retriever.rerank's fallback, 12 September 2026): a
   -- day with a number here served degraded answers, and that number is what pages someone.
   SUM(CAST(jsonPayload.rerank_fallback AS INT64)) AS rerank_fallbacks,
+  -- The managed stores' share of the pools, and the questions a tenant's data_region sent to the kit's index instead
+  -- of a managed store (main.py retrieval_backend_for): a day with policy_fallbacks is a policy working, not a fault.
+  SUM(CAST(jsonPayload.managed_chunks AS INT64)) AS managed_chunks,
+  SUM(CAST(jsonPayload.policy_fallback AS INT64)) AS policy_fallbacks,
   SUM(CAST(jsonPayload.cached_tokens AS INT64)) AS cached_tokens,
   ROUND(SUM(CAST(jsonPayload.cost_usd AS FLOAT64)), 4) AS cost_usd,
   ROUND(SUM(CAST(jsonPayload.cost_usd AS FLOAT64)) * 85, 2) AS cost_inr
@@ -41,4 +50,4 @@ FROM `documind_observability.run_googleapis_com_stdout`
 -- image, no tokens - so media spend per tenant is a GROUP BY, not an estimate.
 WHERE jsonPayload.event IN ("query", "stream", "media")
 GROUP BY day, tenant, surface, model_backend, prompt_version, retrieval_mode,
-         modality;
+         retrieval_backend, modality;

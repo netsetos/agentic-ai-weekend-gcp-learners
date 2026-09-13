@@ -147,6 +147,7 @@ def main() -> int:
     show("by model and backend (what answered, through which door)", group(rows, ("model", "model_backend")), ("model", "model_backend"))
     show("by brain (8.7's question, from the row)", group(rows, ("brain",)), ("brain",))
     show("by surface", group(rows, ("event",)), ("event",))
+    show("by retrieval backend (which store served the pool; 13 September 2026)", group(rows, ("retrieval_backend",)), ("retrieval_backend",))
     show_stages("where the time went (p95 per stage, by tenant)", group(rows, ("tenant",)), ("tenant",))
     return 0
 
