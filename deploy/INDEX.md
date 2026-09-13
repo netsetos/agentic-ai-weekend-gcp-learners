@@ -147,13 +147,13 @@ Lesson ids ending in `p` are practice labs.
 | `evals/make_trainset.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,12.2 |
 | `evals/manifest.json` | data | - | 10.1,10.2,10.5,11.5,12.1,12.7,2.3,4.2,4.2p,4.5,4.5p,4.7,9.3 |
 | `evals/paraphrases.jsonl` | data | - | 12.5 |
-| `evals/real_sources.json` | data | - | 12.7,4.1,4.1p,4.2,4.2p,4.3,4.5,4.5p,9.1 |
+| `evals/real_sources.json` | data | - | 12.7,4.1,4.1p,4.2,4.2p,4.3p,4.3,4.5,4.5p,9.1 |
 | `evals/required.json` | data | - | 10.1p,10.4p,10.6,12.1p,12.2p,12.2,12.4p,12.4,12.7,12.8,2.4p,4.7,5.3,5.5,6.1,6.1p,6.3,6.3p,6.4,7.1p,7.2p |
 | `evals/sft/documind_sft_v1.chat.jsonl` | data | - | 10.5 |
 | `evals/sft/documind_sft_v1.manifest.json` | data | - | 10.1,10.5 |
 | `evals/sft/documind_sft_v1.vertex.jsonl` | data | - | 10.1 |
 | `evals/tune.py` | code | - | 10.1 |
-| `evals/upload.sh` | code | - | 10.1p,11.3p,12.1,12.2p,12.2,12.4,12.5,12.7,2.1p,2.1,4.1,4.1p,4.3p,4.5,4.8,9.1p,9.2,9.3,9.4 |
+| `evals/upload.sh` | code | - | 10.1p,11.3p,12.1,12.2p,12.2,12.4,12.5,12.7,2.1p,2.1,4.1,4.1p,4.5,4.8,9.1p,9.2,9.3,9.4 |
 | `evals/usage_rows.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,11.1,11.2,11.3,11.4,11.5,12.1,12.2,12.3,12.4,12.5,12.6,12.7,12.8 |
 | `extract_documind.py` | code | - | 12.1,12.2,12.3,12.4,12.5,12.6,12.7,12.8,7.1,8.4 |
 | `gke/vllm-deployment.yaml` | code | - | 11.5 |
@@ -213,7 +213,7 @@ Lesson ids ending in `p` are practice labs.
 | `terraform/gke.tf` | code | - | 11.5,12.1 |
 | `terraform/off.tf` | code | - | 12.1,12.3,12.8 |
 | `terraform/reconcile.tf` | code | - | 12.5 |
-| `terraform/spanner.tf` | code | - | 1.1p,4.6 |
+| `terraform/spanner.tf` | code | - | 4.6 |
 | `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.5,4.6,4.7 |
 
 ## E. unreferenced by any notebook (42)
