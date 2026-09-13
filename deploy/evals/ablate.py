@@ -84,11 +84,15 @@ def p95(values: list) -> float:
 class Lane:
     """The three services the API's retriever calls, with the same settings, from outside it."""
 
-    def __init__(self, project: str, region: str, alpha: float = 0.7):
+    def __init__(self, project: str, region: str, alpha: float = 0.7, current_only: bool = True):
         from google import genai
         from google.cloud import discoveryengine_v1 as discoveryengine
         from google.cloud import firestore
         self.project, self.alpha = project, alpha
+        # 12 September 2026: the lane retrieves only rows the ledger marks current (RETRIEVAL_CURRENT_ONLY=on,
+        # retriever.py) - a retired version's chunk is not a hit there, so it is not a hit here either. The
+        # review of the rag_prod plan found this harness counting retired chunks the API would never serve.
+        self.current_only = current_only
         self.embed_client = genai.Client(enterprise=True, project=project, location=region)   # embeddings: regional
         self.db = firestore.Client(project=project, database="(default)")
         self.ranker = discoveryengine.RankServiceClient()
@@ -109,19 +113,24 @@ class Lane:
             from google.cloud.firestore_v1.base_query import FieldFilter
             from rank_bm25 import BM25Okapi
             rows = []
-            for d in (self.db.collection("chunks").where(filter=FieldFilter("tenant_id", "==", tenant))
+            for d in (self._current(self.db.collection("chunks").where(filter=FieldFilter("tenant_id", "==", tenant)))
                       .select(["text", "source_uri"]).stream()):
                 x = d.to_dict()
                 rows.append({"chunk_id": d.id, "text": x.get("text", ""), "source_uri": x.get("source_uri", "")})
             self._tenant[tenant] = (rows, {r["chunk_id"]: r for r in rows}, BM25Okapi([tokens(r["text"]) for r in rows]))
         return self._tenant[tenant]
 
+    def _current(self, query):
+        """The ledger's pre-filter, when the lane applies it: the tenant_id + current + embedding index serves it."""
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        return query.where(filter=FieldFilter("current", "==", True)) if self.current_only else query
+
     def dense(self, question: str, tenant: str, k: int) -> list:
-        """The lane's retriever on the lean profile: find_nearest with the tenant pre-filter."""
+        """The lane's retriever on the lean profile: find_nearest with the tenant pre-filter and the ledger's."""
         from google.cloud.firestore_v1.base_query import FieldFilter
         from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
         from google.cloud.firestore_v1.vector import Vector
-        docs = (self.db.collection("chunks").where(filter=FieldFilter("tenant_id", "==", tenant))
+        docs = (self._current(self.db.collection("chunks").where(filter=FieldFilter("tenant_id", "==", tenant)))
                 .find_nearest(vector_field="embedding", query_vector=Vector(self.embed_query(question)),
                               distance_measure=DistanceMeasure.COSINE, limit=k, distance_result_field="d")
                 .get())
@@ -168,6 +177,8 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="run only the first N anchored rows (a wiring check)")
     ap.add_argument("--tenant", help="only this tenant's rows")
     ap.add_argument("--alpha", type=float, default=0.7, help="RRF weight of the dense leg in the hybrid arm")
+    ap.add_argument("--all-versions", action="store_true",
+                    help="retrieve retired rows too (the lane does not: RETRIEVAL_CURRENT_ONLY=on); for a corpus that predates the ledger")
     ap.add_argument("--ledger", help="append one JSON line per arm to this file (the loop's memory)")
     a = ap.parse_args()
     if not a.project:
@@ -178,7 +189,7 @@ def main() -> int:
     rows = [r for r in rows if r.get("must_retrieve") and (not a.tenant or r["tenant"] == a.tenant)]
     if a.limit:
         rows = rows[:a.limit]
-    lane = Lane(a.project, a.region, a.alpha)
+    lane = Lane(a.project, a.region, a.alpha, current_only=not a.all_versions)
     print(f"{len(rows)} rows with anchors, {sum(len(r['must_retrieve']) for r in rows)} anchors, one knob per arm "
           f"(project {a.project}, embeddings in {a.region}, ranker on global)\n")
     print(f"{'arm':44} {'recall@depth':>12} {'recall@5':>9} {'mrr':>6} {'rows@1.0':>8} {'p95 ms':>7}")

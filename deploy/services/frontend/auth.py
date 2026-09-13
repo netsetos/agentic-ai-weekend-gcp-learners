@@ -42,7 +42,6 @@ def login_gate():
         st.stop()
     return u
 
-@st.cache_data(ttl=300, show_spinner=False)
 def tenant_for(email: str) -> str | None:
     """Which tenant does this person belong to?
 
@@ -54,14 +53,27 @@ def tenant_for(email: str) -> str | None:
     The member doc is keyed by email so rag-api can do a point lookup, and
     carries `email` as a field so this reverse lookup is one collection-group
     query rather than a scan of every tenant.
+
+    Not cached (12 September 2026). This answer sat under st.cache_data(ttl=300),
+    so a person taken off the roster kept their tenant - and the upload right
+    that comes with it (documents.py) - for up to five minutes on every instance
+    that had answered them. The API, the chat service and the MCP server read
+    the roster on every request (shared/tenancy.py); this image cannot import
+    shared/ (its Dockerfile copies only this directory), so it does the same by
+    hand. What is cached is the CONNECTION (_roster_db): one point query per
+    rerun is cheap, a new client per rerun is not.
     """
-    from google.cloud import firestore
-    db = firestore.Client()
-    hits = (db.collection_group("members")
+    hits = (_roster_db().collection_group("members")
               .where("email", "==", email.lower()).limit(1).get())
     for doc in hits:
         return doc.reference.parent.parent.id      # tenants/{THIS}/members/{email}
     return None
+
+
+@st.cache_resource(show_spinner=False)
+def _roster_db():
+    from google.cloud import firestore
+    return firestore.Client()
 
 
 def is_admin(user):

@@ -98,6 +98,24 @@ def embed_with_carry_over(db: firestore.Client, doc, chunks: list[dict]) -> tupl
     return vectors, {"reused": len(chunks) - len(misses), "embedded": len(misses)}
 
 
+def _restricts(tenant_id: str, kind: str, doc_type: str) -> list:
+    """The four restrict namespaces every datapoint carries, set HERE, at write time - a filter applied only at
+    query time is one forgotten WHERE clause away from a leak. rag-api/retriever.py turns each key of a request's
+    `filters` into a Namespace of the same name, so a namespace missing here is a filter that matches nothing.
+
+    tenant_id  what makes one index safe for many customers.
+    kind       so a caller can ask for figures only (filters={"kind": "figure"} in rag-api's QueryRequest).
+    doc_type   the row's doc_type (12 September 2026): filters={"doc_type": "policy"} used to return an empty
+               pool, because the namespace was never written. The value is whatever the row carries - `unknown`
+               for a text upload the worker did not classify - the same field the Firestore fallback filters on.
+    current    the ledger's (12.5): a new version is current; the worker upserts AFTER the swap and removes the
+               retired ids, and the query-time restrict is what a reader asks for."""
+    return [IndexDatapoint.Restriction(namespace="tenant_id", allow_list=[tenant_id]),
+            IndexDatapoint.Restriction(namespace="kind", allow_list=[kind]),
+            IndexDatapoint.Restriction(namespace="doc_type", allow_list=[doc_type]),
+            IndexDatapoint.Restriction(namespace="current", allow_list=["true"])]
+
+
 def to_datapoints(doc, chunks: list[dict],
                   vectors: list[list[float]]) -> list[IndexDatapoint]:
     """chunks are dicts - {text, kind, media_url?, page_start?, start?, end?} - since the
@@ -106,18 +124,7 @@ def to_datapoints(doc, chunks: list[dict],
         IndexDatapoint(
             datapoint_id=doc.chunk_id(i),
             feature_vector=v,
-            # The tenant restrict is what makes one index safe for many
-            # customers. It is set HERE, at write time - a filter applied only
-            # at query time is one forgotten WHERE clause away from a leak.
-            # `kind` is a second restrict so a caller can ask for figures only
-            # (filters={"kind": "figure"} in rag-api's QueryRequest).
-            restricts=[IndexDatapoint.Restriction(
-                           namespace="tenant_id", allow_list=[doc.tenant_id]),
-                       IndexDatapoint.Restriction(
-                           namespace="kind", allow_list=[c.get("kind", "text")]),
-                       # The ledger (12.5): a new version is current; the worker upserts AFTER the swap and
-                       # removes the retired ids, and the query-time restrict is what a reader asks for.
-                       IndexDatapoint.Restriction(namespace="current", allow_list=["true"])],
+            restricts=_restricts(doc.tenant_id, c.get("kind", "text"), doc.doc_type),
         )
         for i, (c, v) in enumerate(zip(chunks, vectors))
     ]
@@ -137,13 +144,37 @@ def upsert(index_name: str, datapoints: list[IndexDatapoint]) -> None:
 
 def remove_datapoints(index_name: str, ids: list[str]) -> None:
     """The full profile's half of retiring a version: the old ids leave the ANN tier (permanent there - the
-    Firestore rows keep the flag and the history)."""
+    Firestore rows keep the flag and the history, and reupsert() below is how the undo puts them back)."""
     if not ids:
         return
     if DRY_RUN:
         print(f"  [dry-run] would remove {len(ids)} datapoints, ids {ids[0]} .. {ids[-1]}")
         return
     aiplatform.MatchingEngineIndex(index_name).remove_datapoints(datapoint_ids=ids)
+
+
+def reupsert(index_name: str, db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: str,
+             chunks_collection: str = "chunks") -> int:
+    """The undo's half on the full profile (12 September 2026). remove_datapoints() took the retired ids out of the
+    ANN tier for good, so an undo that only flipped its Firestore rows left the version current in Firestore and
+    absent from Vector Search - retrievable on the lean profile, invisible on the full one. The rows kept their
+    vectors (the `embedding` field is the chaos fallback's), so the current rows of the reactivated version go back
+    up from there, with the same four restricts to_datapoints() writes, and nothing is embedded. Returns the
+    datapoints upserted; the worker calls it BEFORE it retires the newer version, so the tier never holds none."""
+    query = (db.collection(chunks_collection).where("tenant_id", "==", tenant_id)
+             .where("source_uri", "==", gcs_uri).where("current", "==", True))
+    points = []
+    for snap in query.stream():
+        d = snap.to_dict() or {}
+        key = d.get("doc_key") or snap.id.split("#")[0].replace(":", "_", 1)     # idempotency._doc_key_of's rule
+        if key != doc_key or d.get("embedding") is None:
+            continue
+        points.append(IndexDatapoint(datapoint_id=snap.id, feature_vector=list(d["embedding"]),
+                                     restricts=_restricts(d.get("tenant_id") or tenant_id, d.get("kind") or "text",
+                                                          d.get("doc_type") or "unknown")))
+    if points:
+        upsert(index_name, points)
+    return len(points)
 
 
 def mirror_to_firestore(db: firestore.Client, doc, chunks: list[dict],

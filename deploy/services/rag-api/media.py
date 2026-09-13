@@ -89,6 +89,9 @@ def _usage(tenant_id: str, email: str, cost_usd: float, cached: bool, latency_ms
             "modality": "image", "model": IMAGE_MODEL, "tokens_in": 0, "tokens_out": 0,
             "cached_tokens": 0, "cost_usd": 0.0 if cached else cost_usd, "cached": cached,
             "latency_ms": latency_ms, "answerable": True, "unanswerable_flag": 0,
+            # The stage clocks the API row carries (main.py usage_row): an image has no retrieval and no pool, and
+            # its whole latency is the generate stage - so tenant_daily's p95 per stage holds for modality=image too.
+            "retrieve_ms": 0, "rerank_ms": 0, "generate_ms": latency_ms, "pool": 0, "rerank_fallback": 0,
             "confidence": "high", "model_backend": "vertex", "prompt_version": "media-v1",
             "retrieval_mode": "none", "brain": "ui"}
 

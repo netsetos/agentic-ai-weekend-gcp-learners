@@ -174,18 +174,28 @@ between what its files ship and what the lane calls. *The guard is a switch*: `A
 (`screen_response`; the stream holds its tokens until then), the usage row gains `guard` (`off`, `pass`, or the
 block), `lesson-12.2.sh` carries `ARMOR` / `ARMOR_LOCATION` / `ARMOR_TEMPLATE`, `sa.tf` grants the API
 `roles/modelarmor.user`, and the sessions' lane stays `ARMOR=off` - `make candidate ARMOR=on` is where the guard
-is judged. *The spans are guarded*: `telemetry.py` is imported after the tracer provider inside a try, and a
+is judged. *The answer cache is a switch too* (12 September 2026, the RAG plan's W4): `SEMANTIC_CACHE=on` on the API
+looks 12.6's `answer_cache` up before retrieval with the query's own embedding - per tenant, under the ledger's current
+fingerprint (a reindex makes every earlier answer a miss), for the same filters, top_k and prompt version, within `SEMANTIC_CACHE_TTL_H` (a Firestore TTL policy on
+`expire_at` reaps) - and serves a hit with its original citations as `model_backend=cache`, cost 0, `cache_hit=semantic`;
+`/v1/query` fills it (answerable, cited, not blocked), `/v1/stream` reads it, `smoke.py` asks the golden question twice
+when `/version` says it is on, and the lane stays off until `SEMANTIC_CACHE_THRESHOLD` (0.95) is measured on paraphrase
+pairs. *The spans are guarded*: `telemetry.py` is imported after the tracer provider inside a try, and a
 failed import logs `telemetry_not_instrumented` instead of an outage. *The release is a candidate*:
 `make release-candidate GIT_SHA=<sha>` puts the image `make build` pushed on a `--no-traffic --tag candidate`
-revision, `make eval-live API=<its URL>` judges it, `make promote` moves traffic (`--to-latest`) and
-`make rollback` moves it back to the revision before; `documind-cd.yml` gains a `profile` input whose lean jobs
+revision and records its name in `deploy/.candidate-revision`, `make eval-live API=<its URL>` judges it,
+`make promote` moves traffic to that revision by name (never to "the latest": two candidates in flight would
+promote the wrong one - 12 September 2026), recording the one it moved traffic off in `deploy/.previous-revision`,
+and `make rollback` moves it back to exactly that one; `documind-cd.yml` gains a `profile` input whose lean jobs
 (`release-lean`, then `promote-lean` behind the `production` environment's reviewers) run exactly those targets
 with no Cloud Deploy verb, `wif.tf` pins the branch through `var.deploy_ref` (`DEPLOY_REF`, default
 `refs/heads/main`) and lets `sa-documind-cicd` mint the gate's two identities' tokens. *The smokes are one*:
-`make smoke-all` runs the seven smokes with their exports and tallies PASS/FAIL, `smoke.py` refuses the golden
+`make smoke-all` runs the seven smokes with their exports, tallies PASS/FAIL and exits non-zero when any smoke failed
+(12 September: a FAIL line satisfied the grep and the target exited 0), `smoke.py` refuses the golden
 question without a token as its fourth check, and `services/frontend/requirements.txt` no longer pins the two
 model clients nothing imports. *The rows are a tool*: `make usage HOURS=` (`evals/usage_rows.py`) groups the
-usage rows in Cloud Logging by tenant, model and backend, brain and surface with INR at `USD_INR=85` - the lean
+usage rows in Cloud Logging by tenant, model and backend, brain and surface with INR at `USD_INR=85`, and shows
+where the time went (p95 per stage: retrieve, rerank, generate, with the pool the reranker saw) - the lean
 profile's `tenant_daily`. *Ingestion has live cells*: `make ingest-one FILE= TENANT=` waits for the worker's
 `ingest_ok` line, `make poison` puts a zero-byte object in and waits for `ingest_poison`, `make dlq` peeks at
 `ingest-dlq-sub` without acking. `tools/check_contract.py` applies the lane rules to 12.1 to 12.8 and
@@ -234,7 +244,13 @@ limit, so the corpus's hundred-page Acts go through inline.
 
 ## Tier B — live rehearsal (the day before)
 
-Run on a **disposable** project so nothing real is touched and teardown is total.
+Run on a **disposable** project so nothing real is touched. Teardown is not total: `make down` deletes the
+Cloud Run services, the candidate tag and the context caches (`make down-services`) and then runs
+`terraform destroy`, but it cannot remove Firestore (delete protection), a bucket that holds objects
+(`force_destroy = false`), a tuned endpoint (`make tune`) or the BigQuery views (`make bq-views`) - it names
+them and `gcloud projects delete` is what removes them. On the full profile the audit bucket's retention
+policy is LOCKED (`storage.tf`, `is_locked = local.full`), which blocks even the project's deletion for five
+years, by design; the lean lab keeps the five-year term without the lock, so its project can go.
 
 ```bash
 # 0. one-time: a throwaway project + billing + the tf-state bucket
@@ -265,7 +281,8 @@ make eval-live PROJECT=documind-ai-live-0901
 make features PROJECT=documind-ai-live-0901
 make make-evalset PROJECT=documind-ai-live-0901 TENANT=acme      # -> evals/golden_generated.jsonl, review by hand
 
-# 4. rehearse your demo against the live URLs, then TEAR DOWN — no cost bleed
+# 4. rehearse your demo against the live URLs, then TEAR DOWN — no cost bleed. make down deletes the
+#    services first (down-services), destroys the Terraform tree, and prints what only the next line removes
 make down PROJECT=documind-ai-live-0901
 gcloud projects delete documind-ai-live-0901
 ```
@@ -281,7 +298,7 @@ extracted verbatim from the notebooks.
 - [ ] `make plan` shows the expected resource count, no errors
 - [ ] the three Cloud Run URLs return `/health` 200 (`make smoke`)
 - [ ] a sample RAG query returns an answer **with citations**
-- [ ] `make eval-live` clears its five thresholds, isolation at 100%
+- [ ] `make eval-live` clears its nine thresholds and its fifteen required rows, isolation at 100%
 - [ ] a rostered person signs in through IAP and sees their tenant; a non-member sees the refusal
 - [ ] a query log row lands in BigQuery `query_logs`
 - [ ] billing budget alert + monitoring alert policies exist

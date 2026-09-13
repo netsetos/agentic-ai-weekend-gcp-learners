@@ -63,6 +63,46 @@ resource "google_firestore_index" "chunks_current_vector" {
   }
 }
 
+# The API's filters on the Firestore path (12 September 2026, retriever.py's _firestore_fallback applies
+# doc_type and kind the way the Vector Search restricts do): Firestore refuses a vector query whose
+# equality filters have no matching index rather than degrade, so each combination the API can send has
+# one - with and without the ledger's `current`. Four indexes, built beside the two above.
+locals {
+  chunks_filter_indexes = {
+    doc_type         = ["tenant_id", "doc_type"]
+    current_doc_type = ["tenant_id", "current", "doc_type"]
+    kind             = ["tenant_id", "kind"]
+    current_kind     = ["tenant_id", "current", "kind"]
+  }
+}
+
+resource "google_firestore_index" "chunks_filter_vector" {
+  for_each    = local.chunks_filter_indexes
+  project     = var.project_id
+  database    = google_firestore_database.main.name
+  collection  = "chunks"
+  query_scope = "COLLECTION"
+
+  dynamic "fields" {
+    for_each = each.value
+    content {
+      field_path = fields.value
+      order      = "ASCENDING"
+    }
+  }
+  fields {
+    field_path = "__name__"
+    order      = "ASCENDING"
+  }
+  fields {
+    field_path = "embedding"
+    vector_config {
+      dimension = 768
+      flat {}
+    }
+  }
+}
+
 # answer_cache: the semantic cache from 12.6. Same shape, different collection -
 # and the tenant_id filter is what stops one customer's answer reaching another.
 resource "google_firestore_index" "answer_cache_vector" {
@@ -103,6 +143,18 @@ resource "google_firestore_field" "chunks_expire_at" {
   project    = var.project_id
   database   = google_firestore_database.main.name
   collection = "chunks"
+  field      = "expire_at"
+
+  ttl_config {}
+}
+
+# The answer cache (12.6, SEMANTIC_CACHE=on, 12 September 2026) stamps every entry with
+# expire_at = created + SEMANTIC_CACHE_TTL_H, and this policy is what removes it; the lookup skips an
+# expired entry the policy has not reached yet, so the ceiling holds either way.
+resource "google_firestore_field" "answer_cache_expire_at" {
+  project    = var.project_id
+  database   = google_firestore_database.main.name
+  collection = "answer_cache"
   field      = "expire_at"
 
   ttl_config {}

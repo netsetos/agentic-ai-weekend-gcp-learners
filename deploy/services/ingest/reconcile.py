@@ -4,7 +4,8 @@
     python reconcile.py --project P --apply         # do it; the last line carries the DRIFT the night measured
     python reconcile.py --project P --backfill --apply    # chunks and documents written before the ledger get
                                                           # current=true, doc_key, and a sources/ row each
-    python reconcile.py --project P --retire gs://P-uploads/acme/old.pdf --apply
+    python reconcile.py --project P --retire gs://P-uploads/acme/old.pdf --apply     # withdraw by hand: a tombstone
+    python reconcile.py --project P --restore gs://P-uploads/acme/old.pdf --apply    # and the way back
     python reconcile.py --project P --report [--tenant acme] [--json]   # the versions view: every source's current
                                                           # version, generation, counts, dates, the corpus fingerprint
     python reconcile.py --project P --purge [--apply]     # the manual twin of the TTL policy: retired rows past expire_at
@@ -21,6 +22,14 @@ trigger. The walk ends with one number, drift: how far the ledger stood from the
 it from a shell; reconcile.tf declares the Cloud Run job on the ingest image and schedules it nightly beside
 documind-off. The TTL policy in firestore_indexes.tf is the only deleter on the lane; --purge exists for a lane
 that has not applied it, prints by default, and says so.
+
+Two states the walk leaves alone (12 September 2026). A source a person retired by hand (--retire, make retire)
+is `withdrawn`: its object is kept, and the first version of this planner read "retired in the ledger but back in
+the bucket" and re-ingested it the same night - the worker's undo brought back what a person had just taken
+down. Now the plan says "withdrawn, object kept" and does nothing; --restore (make restore) clears the tombstone
+and rewrites the object so the worker's own path brings it back. And a document the worker handed to the batch
+lane (`queued` on documents/, no consumer built) is reported as queued, not hashed and not rewritten every night.
+Neither counts as drift.
 """
 from __future__ import annotations
 
@@ -40,26 +49,49 @@ def source_id_for(tenant_id: str, name: str) -> str:
     return name.replace("/", "~")
 
 
+def _name_of(gcs_uri: str) -> str:
+    """gs://bucket/acme/x.md -> acme/x.md (idempotency._name_of, repeated for the same reason)."""
+    return gcs_uri.split("/", 3)[3] if gcs_uri.startswith("gs://") and gcs_uri.count("/") >= 3 else gcs_uri
+
+
 def plan(objects: list[dict], ledger: dict[str, dict], documents: dict[str, dict]) -> list[dict]:
     """Pure: what to do for each object and each ledger row.
 
     objects:   [{name, generation, tenant_id}] - the bucket's CURRENT generations (one per name)
     ledger:    {source_id: {gcs_uri, doc_key, generation, sha256, status}}
-    documents: {doc_key: {status, gcs_uri}} - the per-version claims
-    Returns actions: retire | reingest | backfill | check_bytes | ok."""
+    documents: {doc_key: {status, gcs_uri, generation?}} - the per-version claims
+    Returns actions: retire | reingest | backfill | check_bytes | ok - and two that act on nothing (12 September
+    2026): `withdrawn`, a source a person retired by hand, whose object stays where it is until make restore; and
+    `queued`, a generation the worker handed to the batch lane (its consumer is not built), which must not be
+    hashed or rewritten onto itself every night. Neither is drift."""
     actions = []
     seen = set()
+    # The batch lane's claims, by object name and generation: a later generation of the same name is a new
+    # version and is planned as usual, so a queued claim never hides what came after it.
+    queued = {(_name_of(d.get("gcs_uri") or ""), str(d.get("generation") or ""))
+              for d in documents.values() if d.get("status") == "queued"}
     for o in objects:
         if o["name"].endswith(SKIP_SUFFIXES) or "/" not in o["name"]:
             continue
         sid = source_id_for(o["tenant_id"], o["name"])
         seen.add(sid)
         row = ledger.get(sid)
-        if row is None:
+        if (o["name"], str(o["generation"])) in queued or (o["name"], "") in queued:
+            actions.append({"action": "queued", "name": o["name"], "tenant_id": o["tenant_id"],
+                            "generation": o["generation"],
+                            "why": "handed to the batch lane; no consumer is built, the claim says queued"})
+        elif row is None:
             # Never in the ledger. Same bytes may already be indexed (a lane older than the ledger): that is a
             # backfill, decided once the bytes are hashed; otherwise ingest it through the normal path.
             actions.append({"action": "check_bytes", "name": o["name"], "tenant_id": o["tenant_id"],
                             "generation": o["generation"], "why": "not in the ledger"})
+        elif row.get("status") == "withdrawn":
+            # The tombstone. The object is kept on purpose; nothing here rewrites it - make restore does.
+            moved = str(row.get("generation")) != str(o["generation"])
+            actions.append({"action": "withdrawn", "name": o["name"], "tenant_id": o["tenant_id"],
+                            "generation": o["generation"],
+                            "why": "withdrawn, object kept" + (f" (generation {row.get('generation')} -> {o['generation']}: "
+                                                              "make restore re-ingests what the object holds now)" if moved else "")})
         elif row.get("status") == "retired":
             actions.append({"action": "reingest", "name": o["name"], "tenant_id": o["tenant_id"],
                             "generation": o["generation"], "why": "retired in the ledger but back in the bucket"})
@@ -69,20 +101,31 @@ def plan(objects: list[dict], ledger: dict[str, dict], documents: dict[str, dict
         else:
             actions.append({"action": "ok", "name": o["name"], "tenant_id": o["tenant_id"]})
     for sid, row in ledger.items():
-        if sid not in seen and row.get("status") != "retired":
-            actions.append({"action": "retire", "name": row.get("name") or sid.replace("~", "/"),
+        if sid in seen or row.get("status") == "retired":
+            continue
+        if row.get("status") == "withdrawn":
+            # Its rows were retired when it was withdrawn; the object leaving changes nothing but the way back.
+            actions.append({"action": "withdrawn", "name": row.get("name") or sid.replace("~", "/"),
                             "tenant_id": row.get("tenant_id"), "gcs_uri": row.get("gcs_uri"),
-                            "why": "gone from the bucket"})
+                            "why": "withdrawn, object gone: make restore needs the bytes uploaded again"})
+            continue
+        actions.append({"action": "retire", "name": row.get("name") or sid.replace("~", "/"),
+                        "tenant_id": row.get("tenant_id"), "gcs_uri": row.get("gcs_uri"),
+                        "why": "gone from the bucket"})
     return actions
 
 
 def decide_bytes(sha: str, tenant_id: str, ledger_row: dict | None, documents: dict[str, dict]) -> str:
-    """After hashing an object: backfill (already indexed under this sha), skip (metadata-only change) or reingest."""
+    """After hashing an object: backfill (already indexed under this sha), skip (metadata-only change), queued
+    (the batch lane holds this version) or reingest."""
     key = f"{tenant_id}_{sha}"
     if ledger_row and ledger_row.get("sha256") == sha:
         return "touch"          # the bytes did not change: record the new generation, nothing to index
-    if documents.get(key, {}).get("status") in ("indexed", "superseded"):
+    status = documents.get(key, {}).get("status")
+    if status in ("indexed", "superseded"):
         return "backfill"       # the version exists; the ledger just never heard of it
+    if status == "queued":
+        return "queued"         # the worker handed these bytes to the batch lane; a rewrite would only re-queue them
     return "reingest"
 
 
@@ -91,7 +134,8 @@ def drift_of(summary: dict) -> int:
     from the bucket (retire), one whose bytes changed under a lost event (reingest), one the ledger never saw
     (backfill, or reingest) count one each; a metadata-only change (touch) does not - the content was right.
     reconcile_done carries it, alerts.tf turns it into a metric, and the policy pages when it stays above zero
-    for two runs: one night's drift is a lost event, two nights' is a lane nobody is reconciling."""
+    for two runs: one night's drift is a lost event, two nights' is a lane nobody is reconciling. A withdrawn
+    source and a queued document are decisions, not drift; they are counted beside it."""
     return int(summary.get("retire", 0)) + int(summary.get("reingest", 0)) + int(summary.get("backfill", 0))
 
 
@@ -131,9 +175,26 @@ def selftest() -> int:
             {"id": "c", "current": True, "expire_at": now - timedelta(days=1)},
             {"id": "d", "current": False}]
     assert [r["id"] for r in expired(rows, now)] == ["a"], "only a retired row past its stamp expires"
+    # the tombstone and the batch lane (12 September 2026): neither is re-ingested, hashed or retired by the walk
+    ledger["acme~kept.md"] = {"gcs_uri": "gs://b/acme/kept.md", "doc_key": "acme_s4", "generation": "4", "sha256": "s4",
+                              "status": "withdrawn", "name": "acme/kept.md", "tenant_id": "acme"}
+    ledger["acme~left.md"] = {"gcs_uri": "gs://b/acme/left.md", "doc_key": "acme_s5", "generation": "1", "sha256": "s5",
+                              "status": "withdrawn", "name": "acme/left.md", "tenant_id": "acme"}
+    objs += [{"name": "acme/kept.md", "generation": "4", "tenant_id": "acme"},
+             {"name": "acme/big.pdf", "generation": "2", "tenant_id": "acme"}]
+    docs["acme_s7"] = {"status": "queued", "gcs_uri": "gs://b/acme/big.pdf", "generation": "2"}
+    acts = [(a["action"], a["name"]) for a in plan(objs, ledger, docs)]
+    assert ("withdrawn", "acme/kept.md") in acts and ("reingest", "acme/kept.md") not in acts, acts
+    assert ("retire", "acme/left.md") not in acts and ("withdrawn", "acme/left.md") in acts, acts
+    assert ("queued", "acme/big.pdf") in acts and ("check_bytes", "acme/big.pdf") not in acts, acts
+    assert decide_bytes("s7", "acme", None, docs) == "queued"
+    later = plan([{"name": "acme/big.pdf", "generation": "3", "tenant_id": "acme"}], ledger, docs)
+    assert later[0]["action"] == "check_bytes", "a later generation of a queued name is a new version"
+    assert drift_of({"retire": 1, "withdrawn": 2, "queued": 1}) == 1, "a withdrawn source and a queued document are not drift"
     print("selftest OK: a retired source, two byte checks, an untouched one, the diarisation file skipped; "
           "touch / backfill / reingest decided from the hash; the generation guard (5 < 7 stale, 7 and 9 not); "
-          "drift 4 of {retire 1, reingest 2, backfill 1, touch 3}; one expired row of four")
+          "drift 4 of {retire 1, reingest 2, backfill 1, touch 3}; one expired row of four; a withdrawn source kept "
+          "and one gone, neither re-ingested nor retired; a queued document skipped until its next generation")
     return 0
 
 
@@ -144,7 +205,8 @@ def main() -> int:
     ap.add_argument("--tenant", help="one tenant prefix only")
     ap.add_argument("--apply", action="store_true", help="act; the default prints the plan")
     ap.add_argument("--backfill", action="store_true", help="chunks and documents written before the ledger")
-    ap.add_argument("--retire", help="a gs:// URI (or tenant/name) to retire by hand")
+    ap.add_argument("--retire", help="a gs:// URI (or tenant/name) to withdraw by hand: a tombstone the walk honours")
+    ap.add_argument("--restore", help="a gs:// URI (or tenant/name) withdrawn by --retire: clear the tombstone, re-ingest")
     ap.add_argument("--report", action="store_true", help="the versions view: sources/ and the corpus fingerprint")
     ap.add_argument("--purge", action="store_true", help="retired rows past expire_at (the TTL policy's manual twin)")
     ap.add_argument("--json", action="store_true", help="--report as JSON lines")
@@ -224,17 +286,56 @@ def main() -> int:
         return 0
 
     if a.retire:
+        # WITHDRAWAL IS A TOMBSTONE (12 September 2026). The rows are retired as for any retirement - flagged,
+        # stamped, never deleted - but the ledger row says `withdrawn`, not `retired`: `retired` means the object
+        # left the bucket and an object that comes back is re-ingested, which for a hand retirement was exactly
+        # wrong - the object never left, and the next night's walk resurrected what a person had taken down.
+        # A withdrawn source is left alone by the walk, acked by the worker, refused by the undo; --restore ends it.
         uri = a.retire if a.retire.startswith("gs://") else f"gs://{bucket_name}/{a.retire}"
         name = uri.split(f"gs://{bucket_name}/", 1)[-1]
         tenant = name.split("/", 1)[0]
         if not a.apply:
-            print(f"would retire every current chunk of {uri} (--apply to do it; the rows expire {RETENTION_DAYS} days later)")
+            print(f"would withdraw {uri}: every current chunk retired (the rows expire {RETENTION_DAYS} days later), the ledger "
+                  f"row withdrawn - the object stays, the night's walk leaves it, make restore SOURCE= brings it back (--apply to do it)")
             return 0
         gone = retire_previous(db, tenant, uri, None, expire_at=expire_at)
         db.collection("sources").document(source_id_for(tenant, name)).set(
-            {"status": "retired", "retired_at": firestore.SERVER_TIMESTAMP}, merge=True)
-        fp = refresh_fingerprint(db, tenant, "reconcile_retired")
-        print(json.dumps({"event": "reconcile_retired", "gcs_uri": uri, "fingerprint": fp, **gone}))
+            {"status": "withdrawn", "withdrawn_at": firestore.SERVER_TIMESTAMP}, merge=True)
+        fp = refresh_fingerprint(db, tenant, "reconcile_withdrawn")
+        print(json.dumps({"event": "reconcile_withdrawn", "gcs_uri": uri, "fingerprint": fp, **gone,
+                          "note": "a tombstone: the object is kept and nothing automatic re-ingests it; make restore SOURCE= does"}))
+        return 0
+
+    if a.restore:
+        # THE WAY BACK. The tombstone goes first, to `retired` - the state a lost event recovers from: if the
+        # rewrite's finalize event never arrives, the next walk plans the reingest itself. Then the rewrite: a new
+        # generation, the same event, the worker's one path - reactivate when every retired row is still inside the
+        # undo window (nothing embedded), a fresh ingest when the TTL policy has been at them.
+        uri = a.restore if a.restore.startswith("gs://") else f"gs://{bucket_name}/{a.restore}"
+        name = uri.split(f"gs://{bucket_name}/", 1)[-1]
+        tenant = name.split("/", 1)[0]
+        ref = db.collection("sources").document(source_id_for(tenant, name))
+        snap = ref.get()
+        row = (snap.to_dict() or {}) if snap.exists else {}
+        if row.get("status") != "withdrawn":
+            print(json.dumps({"event": "reconcile_restore_refused", "gcs_uri": uri, "status": row.get("status"),
+                              "why": "only a withdrawn source is restored: a retired one comes back when its object does, "
+                                     "an indexed one is already live"}))
+            return 1
+        blob = bucket.get_blob(name)
+        if blob is None:
+            print(json.dumps({"event": "reconcile_restore_refused", "gcs_uri": uri, "status": "withdrawn",
+                              "why": "the object is gone: upload the bytes again under this name and the worker ingests them"}))
+            return 1
+        if not a.apply:
+            print(f"would restore {uri}: the tombstone cleared, the object rewritten onto itself, the worker reactivates the rows "
+                  f"inside the {RETENTION_DAYS}-day undo window or re-ingests the bytes after it (--apply to do it)")
+            return 0
+        ref.set({"status": "retired", "restored_at": firestore.SERVER_TIMESTAMP,
+                 "withdrawn_at": firestore.DELETE_FIELD}, merge=True)
+        blob.rewrite(blob)
+        print(json.dumps({"event": "reconcile_restored", "gcs_uri": uri, "generation": str(blob.generation),
+                          "next": "ingest_reactivated inside the undo window, ingest_ok (a fresh version) after it"}))
         return 0
 
     if a.backfill:
@@ -287,7 +388,7 @@ def main() -> int:
               if not a.tenant or (s.to_dict() or {}).get("tenant_id") == a.tenant}
     documents = {s.id: (s.to_dict() or {}) for s in db.collection("documents").stream()}
     actions = plan(objects, ledger, documents)
-    summary = {"retire": 0, "reingest": 0, "backfill": 0, "touch": 0, "ok": 0}
+    summary = {"retire": 0, "reingest": 0, "backfill": 0, "touch": 0, "ok": 0, "withdrawn": 0, "queued": 0}
     touched = set()
     for act in actions:
         if act["action"] == "ok":

@@ -7,7 +7,7 @@
     make judge PROJECT=... CHAT_URL=https://documind-chat-...   # + trajectories: /v1/chat's tool_calls, three brains
     python evals/judge.py --selftest                      # the assembly and the trajectory maths, offline
 
-run_eval.py is the gate: five thresholds, no model in the loop, green or red. This is the OTHER judge -
+run_eval.py is the gate: nine thresholds and fifteen required rows, no model in the loop, green or red. This is the OTHER judge -
 Gemini reading the same 64 answers for groundedness (is the answer supported by the context it cites?)
 and fulfilment (did it answer what was asked?) through Vertex AI Evaluation, with bring-your-own
 responses: nothing here generates; every response was produced by the deployed service, so the score
@@ -193,18 +193,44 @@ def revision_sha(api_url: str, project: str) -> str:
         return ""
 
 
-def evaluate(df, experiment: str, run_name: str, pairwise: bool, project: str, location: str = "us-central1") -> dict:
-    """Pointwise groundedness and fulfilment (or its successor); pairwise question-answering quality when a baseline column exists."""
+def template_hash(names: list[str]) -> str:
+    """Six hex digits of the metric prompt templates the installed SDK ships: a judge is its prompt, and a run
+    judged by a different one is a different run. Goes into the run name."""
+    import hashlib
+    from vertexai.evaluation import MetricPromptTemplateExamples as ex
+    text = "\n".join(str(getattr(ex.Pointwise, n).metric_prompt_template) for n in names)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:6]
+
+
+def evaluate(df, experiment: str, run_name: str, pairwise: bool, project: str, location: str = "us-central1",
+             judge_model: str = "") -> dict:
+    """Pointwise groundedness and fulfilment (or its successor); pairwise question-answering quality when a baseline column exists.
+
+    12 September 2026: the judge is named. --judge-model pins the autorater when the SDK exposes AutoraterConfig
+    (else the service's default judges, and the run says so); what did NOT run - pairwise without --api-b,
+    trajectories without --chat-url - is printed as off, never left to be inferred from an absent column."""
     import vertexai
     from vertexai.evaluation import EvalTask, MetricPromptTemplateExamples, PairwiseMetric
     vertexai.init(project=project, location=location, experiment=experiment)
     names, metrics = pointwise_metrics()
-    print(f"  pointwise: {' + '.join(names)}")
+    print(f"  pointwise: {' + '.join(names)}  (templates {template_hash(names)})")
     if pairwise:
         metrics.append(PairwiseMetric(
             metric="pairwise_question_answering_quality",
             metric_prompt_template=MetricPromptTemplateExamples.get_prompt_template("pairwise_question_answering_quality")))
-    result = EvalTask(dataset=df, metrics=metrics, experiment=experiment).evaluate(experiment_run_name=run_name)
+    else:
+        print("  pairwise: off (no --api-b)")
+    kwargs = {}
+    if judge_model:
+        try:
+            from vertexai.evaluation import AutoraterConfig
+            kwargs["autorater_config"] = AutoraterConfig(autorater_model=judge_model)
+            print(f"  judge: {judge_model}")
+        except ImportError:
+            print(f"  judge: the service default - this SDK has no AutoraterConfig, --judge-model {judge_model} not applied")
+    else:
+        print("  judge: the service default (pass --judge-model to pin one)")
+    result = EvalTask(dataset=df, metrics=metrics, experiment=experiment, **kwargs).evaluate(experiment_run_name=run_name)
     summary = dict(result.summary_metrics)
     # By shape, from the per-row table: a refusal row has no context to be grounded in, so the overall mean
     # mixes what the judge can score with what it cannot. The answerable shapes are the number that means something.
@@ -254,6 +280,8 @@ def main() -> int:
     ap.add_argument("--experiment", default="documind-eval")
     ap.add_argument("--label", default="", help="names the Experiments run api-<label>-<time>; default: the API revision's GIT_SHA")
     ap.add_argument("--rows", type=int, default=0, help="only the first N golden rows (a wiring check)")
+    ap.add_argument("--judge-model", default=os.environ.get("DOCUMIND_JUDGE_MODEL", ""),
+                    help="pin the autorater (e.g. gemini-3.1-flash-lite); default: the Evaluation service's own")
     ap.add_argument("--trajectory-rows", type=int, default=6)
     ap.add_argument("--no-vertex", action="store_true", help="collect and print, skip the Evaluation service")
     ap.add_argument("--reuse", default="", help="a JSON file: load the collected rows from it if it exists, else collect and write it")
@@ -301,6 +329,8 @@ def main() -> int:
     cited = sum(len(r.get("cited") or []) for r in rows if r["status"] == 200)
     print(f"  context: {hit}/{cited} cited chunks read in full from the store" + ("" if hit else " - the judge reads the quotes only"))
     df = to_frame([r for r in rows if r["status"] == 200], baseline=baseline)
+    if not a.chat_url:
+        print("  trajectories: off (no --chat-url)")
     if a.chat_url:
         tr = trajectories(a.chat_url, golden, os.environ.get("DOCUMIND_ID_TOKEN_CHAT") or token, a.trajectory_rows)
         for brain in BRAINS:
@@ -319,7 +349,7 @@ def main() -> int:
     # with the first's half-made run). The label groups runs by the revision that answered; the time keeps them apart.
     label = a.label or revision_sha(a.api_url, a.project) or os.environ.get("GIT_SHA", "dev")
     run_name = f"api-{label}-{time.strftime('%Y%m%d-%H%M')}" + ("-vs-candidate" if a.api_b else "")
-    summary = evaluate(df, a.experiment, run_name, pairwise=bool(a.api_b), project=a.project)
+    summary = evaluate(df, a.experiment, run_name, pairwise=bool(a.api_b), project=a.project, judge_model=a.judge_model)
     print(f"\n  Experiments run {a.experiment}/{run_name}:")
     for k in sorted(summary):
         if k.endswith("/mean") or "/mean[" in k or k.endswith("/std") or "win_rate" in k or k == "row_count":

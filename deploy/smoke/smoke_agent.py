@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live smoke test for the A2A peer (lesson 8.4) - three protocols in one request, four checks.
+"""Live smoke test for the A2A peer (lesson 8.4) - three protocols in one request, five checks.
 
     make smoke-agent PROJECT=...                      # from deploy/, after documind-agent is deployed
     DOCUMIND_AGENT_URL=https://documind-agent-NUMBER.us-central1.run.app \\
@@ -9,6 +9,10 @@
     2. the agent card with a token      -> 200, and the card's address is this service's url
     3. message/send (the gratuity row)  -> a completed task whose answer came through documind-mcp
     4. message/send naming tenant zeta  -> the roster's refusal, relayed by the peer (its account is on acme only)
+    5. message/send as the OUTSIDER, with a token -> 403 at the door (Cloud Run IAM). The peer has no roster of
+       its own, so IAM is the only refusal it has; a project-wide roles/run.invoker made this call ANSWER until
+       12 September 2026 (sa.tf's caller graph). Skipped, with a line, when no token can be minted as the
+       outsider (DOCUMIND_OUTSIDER_SA, or documind-outsider-sa in the member account's project).
 
 Plain urllib and JSON-RPC - no a2a-sdk in the shell. The message shape is the one the ADK-served
 A2A 1.x endpoint accepts (proven offline against a2a-sdk 1.1.2 + google-adk 2.8.0, 8 Sept 2026):
@@ -28,6 +32,7 @@ import uuid
 
 AGENT_URL = os.environ.get("DOCUMIND_AGENT_URL", "").rstrip("/")
 IMPERSONATE = os.environ.get("DOCUMIND_IMPERSONATE_SA", "")
+OUTSIDER = os.environ.get("DOCUMIND_OUTSIDER_SA", "")
 QUESTION = os.environ.get("DOCUMIND_SMOKE_QUESTION",
                           "After how many years of continuous service does gratuity become payable?")
 passed, failed = [], []
@@ -52,6 +57,16 @@ def token_as(sa: str) -> str | None:
     except Exception as e:  # noqa: BLE001
         print(f"  (could not mint a token as {sa}: {getattr(e, 'stderr', '') or e})".strip()[:300])
         return None
+
+
+def outsider_account(impersonate: str, explicit: str = "") -> str:
+    """The eval gate's outsider (sa.tf): DOCUMIND_OUTSIDER_SA when set - smoke-chat and smoke-mcp pass it -
+    else the account the Makefile names, in the project the member account lives in. Empty when neither."""
+    if explicit:
+        return explicit
+    if "@" in impersonate:
+        return "documind-outsider-sa@" + impersonate.split("@", 1)[1]
+    return ""
 
 
 def http(path: str, token: str | None, body: dict | None = None, timeout: int = 180):
@@ -124,6 +139,25 @@ def main() -> int:
     low = text.lower()
     (ok if status == 200 and any(w in low for w in ("roster", "not on", "refus", "cannot", "not a member", "no access")) else bad)(
         "zeta refused by the roster", f"{text[:110]!r}")
+
+    # 5. the outsider WITH a token: refused at the door. Every other surface lets this account knock and
+    #    refuses it by the roster; the peer has no roster and speaks to the lane as itself, so Cloud Run IAM
+    #    is the only refusal it has - and a project-wide roles/run.invoker made this call answer, as acme,
+    #    until 12 September 2026 (sa.tf's caller graph: ui-sa and chat-sa may call the peer, nobody else).
+    outsider_sa = outsider_account(IMPERSONATE, OUTSIDER)
+    outsider = token_as(outsider_sa) if outsider_sa else None
+    if not outsider:
+        print(f"  [SKIP] outsider refused at the door  (no token as {outsider_sa or 'documind-outsider-sa'}: "
+              f"set DOCUMIND_OUTSIDER_SA, and `make operators` grants the minting)")
+    else:
+        status, j, text = send(outsider, QUESTION)
+        detail = f"status={status}"
+        if status == 401:
+            detail += "  - the token itself was refused (audience?), which proves nothing about the door"
+        elif status != 403:
+            detail += (f"  {(text or str(j))[:100]!r}  - the peer ANSWERED an outsider: a project-wide "
+                       f"roles/run.invoker admits it; sa.tf's caller graph says only ui-sa and chat-sa may call")
+        (ok if status == 403 else bad)("outsider refused at the door", detail)
 
     print("  " + "-" * 56 + f"\n  {len(passed)} passed, {len(failed)} failed\n")
     return 1 if failed else 0

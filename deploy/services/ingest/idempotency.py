@@ -1,22 +1,34 @@
 """The claim: exactly one worker may process a given document - and the ledger: one current version per document."""
 import hashlib
 import logging
+import os
+from datetime import datetime, timezone
 
 from google.cloud import firestore
 
 log = logging.getLogger("documind.ingest")
 BATCH = 400          # a Firestore batch holds 500 writes; commit early
+# The undo window (12 September 2026). The worker stamps expire_at = now + RETENTION_DAYS on a retired row and the TTL
+# policy deletes it after that, so an undo older than this cannot find every row. Read the way the worker reads it -
+# variables.tf's retention_days, passed by make deploy-services - so the two never disagree.
+RETENTION_DAYS = int(os.environ.get("RETENTION_DAYS", "30"))
 
 
-def claim(db: firestore.Client, doc_key: str, gcs_uri: str) -> bool:
+def claim(db: firestore.Client, doc_key: str, gcs_uri: str, tenant_id: str, retake: bool = False) -> bool:
     """Claim doc_key. True if THIS caller may proceed, False if someone already did.
 
     The transaction is the whole point. Read-then-write without one is a race
     with a window measured in milliseconds - and Pub/Sub delivers duplicates
     concurrently, so it is a window that gets hit. Two workers both read
     "absent", both write, and the document is ingested twice.
+
+    The row carries tenant_id (12 September 2026): the MCP server's list_documents filters on the field, never on
+    the id's prefix - `acme` must not list `acme_eu_*`. retake=True takes a `superseded` claim back: the worker asks
+    for it after reactivate() refused the undo, so the bytes are ingested as a fresh version instead of being acked
+    as a duplicate for ever. A `queued` claim belongs to the batch lane and is never retaken.
     """
     ref = db.collection("documents").document(doc_key)
+    retakes = ("failed", "superseded") if retake else ("failed",)
 
     @firestore.transactional
     def _claim(tx: firestore.Transaction) -> bool:
@@ -25,9 +37,10 @@ def claim(db: firestore.Client, doc_key: str, gcs_uri: str) -> bool:
         # writes it so the error is readable; the NEXT delivery must be allowed to try
         # again, or "give the claim back" gave nothing back: on the first live load every
         # retry of a failed document was acked as a duplicate and the document stayed failed.
-        if snap.exists and snap.get("status") != "failed":
+        if snap.exists and snap.get("status") not in retakes:
             return False
         tx.set(ref, {"gcs_uri": gcs_uri,
+                     "tenant_id": tenant_id,
                      "status": "processing",
                      "claimed_at": firestore.SERVER_TIMESTAMP})
         return True
@@ -77,6 +90,14 @@ def release(db: firestore.Client, doc_key: str, error: str) -> None:
 # stamped expire_at; the Firestore TTL policy in firestore_indexes.tf is the only thing that ever deletes a chunk,
 # and nothing here calls delete. Every change refreshes the tenant's corpus fingerprint (ledger/{tenant}); the API's
 # cache record carries the fingerprint it was packed from and stops being used when they differ.
+#
+# The tombstone and the verified undo (12 September 2026, the R05 findings). A source a person retires by hand
+# (make retire) is `withdrawn` in sources/ - distinct from `retired` (its object left the bucket) and from `superseded`
+# (a re-issue) - and nothing automatic brings it back: reconcile leaves the object where it is, the same bytes again
+# are acked, reactivate() refuses; make restore SOURCE= clears it. And reactivate() counts before it flips: the rows
+# still here against the claim's chunk count, the retire stamp (retired_at on documents/{doc_key}) against
+# RETENTION_DAYS. A shortfall or a closed window is reactivate_incomplete, and the worker re-ingests the bytes instead
+# of retiring the newer version over a partial undo.
 
 
 def source_id_for(tenant_id: str, name: str) -> str:
@@ -141,7 +162,8 @@ def retire_previous(db: firestore.Client, tenant_id: str, gcs_uri: str, keep_doc
     for key in retired_keys:
         db.collection("documents").document(key).set(
             {"status": "superseded", "superseded_by": keep_doc_key,
-             "superseded_at": firestore.SERVER_TIMESTAMP}, merge=True)
+             "superseded_at": firestore.SERVER_TIMESTAMP,
+             "retired_at": firestore.SERVER_TIMESTAMP}, merge=True)     # the undo window's clock (reactivate)
     return {"retired_doc_keys": sorted(retired_keys), "retired_ids": retired_ids,
             "retired_chunks": len(retired_ids)}
 
@@ -189,35 +211,75 @@ def swap_versions(db: firestore.Client, tenant_id: str, gcs_uri: str, new_doc_ke
     for key in retired_keys:
         db.collection("documents").document(key).set(
             {"status": "superseded", "superseded_by": new_doc_key,
-             "superseded_at": firestore.SERVER_TIMESTAMP}, merge=True)
+             "superseded_at": firestore.SERVER_TIMESTAMP,
+             "retired_at": firestore.SERVER_TIMESTAMP}, merge=True)     # the undo window's clock (reactivate)
     return {"activated": activated, "retired_doc_keys": sorted(retired_keys), "retired_ids": retired_ids,
             "retired_chunks": len(retired_ids)}
 
 
+def _name_of(gcs_uri: str) -> str:
+    """gs://bucket/acme/x.md -> acme/x.md: the object name the ledger keys on (source_id_for)."""
+    return gcs_uri.split("/", 3)[3] if gcs_uri.startswith("gs://") and gcs_uri.count("/") >= 3 else gcs_uri
+
+
+def withdrawn(db: firestore.Client, tenant_id: str, gcs_uri: str) -> bool:
+    """The tombstone (12 September 2026): a person retired this source by hand (make retire), and only make restore
+    may bring it back. The worker asks before the undo; reactivate() asks again, so no caller can skip it."""
+    snap = db.collection("sources").document(source_id_for(tenant_id, _name_of(gcs_uri))).get()
+    return bool(snap.exists and (snap.to_dict() or {}).get("status") == "withdrawn")
+
+
 def reactivate(db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: str,
-               chunks_collection: str = "chunks") -> int:
+               chunks_collection: str = "chunks", retention_days: int | None = None) -> int | None:
     """The undo. The same bytes uploaded again after a newer version retired them: their chunks are still here,
     flagged, so flipping the flag back is a re-index that costs nothing. The caller retires the newer version next.
-    The retention stamp goes with the flag: a reactivated row is current, and the TTL must not take it."""
-    n, batch, pending = 0, db.batch(), 0
+    The retention stamp goes with the flag: a reactivated row is current, and the TTL must not take it.
+
+    Verified before anything is flipped (12 September 2026). The first undo flipped whatever rows remained and
+    the worker retired the newer version on the strength of it - after RETENTION_DAYS the TTL policy had taken the
+    rows, zero were flipped, and the source was left with no current version at all. So the rows still here are
+    counted against the claim's chunk count, and the retire stamp against RETENTION_DAYS; a shortfall or a closed
+    window is `reactivate_incomplete` with both numbers, None comes back, and nothing has changed - the worker
+    re-ingests the bytes instead. A withdrawn source is refused the same way (`reactivate_withdrawn`). Otherwise
+    the rows flipped, as a count, with the claim's stamps cleared."""
+    if withdrawn(db, tenant_id, gcs_uri):
+        log.info('{"event":"reactivate_withdrawn","doc_key":"%s","gcs_uri":"%s","hint":"make restore SOURCE="}',
+                 doc_key, gcs_uri)
+        return None
     query = (db.collection(chunks_collection).where("tenant_id", "==", tenant_id)
              .where("source_uri", "==", gcs_uri))
-    for snap in query.stream():
-        if _doc_key_of(snap) == doc_key and (snap.to_dict() or {}).get("current") is False:
-            batch.update(snap.reference, {"current": True, "superseded_by": firestore.DELETE_FIELD,
-                                          "superseded_at": firestore.DELETE_FIELD,
-                                          "expire_at": firestore.DELETE_FIELD,
-                                          "effective_to": firestore.DELETE_FIELD,
-                                          "reactivated_at": firestore.SERVER_TIMESTAMP})
-            n += 1
-            pending += 1
-            if pending == BATCH:
-                batch.commit()
-                batch, pending = db.batch(), 0
+    rows = [snap for snap in query.stream()
+            if _doc_key_of(snap) == doc_key and (snap.to_dict() or {}).get("current") is False]
+    claim_snap = db.collection("documents").document(doc_key).get()
+    record = (claim_snap.to_dict() or {}) if claim_snap.exists else {}
+    expected, stamp = record.get("chunks"), record.get("retired_at")
+    window = RETENTION_DAYS if retention_days is None else int(retention_days)
+    age = None
+    if isinstance(stamp, datetime):                     # a claim from before the stamp has no clock: the count decides
+        age = (datetime.now(timezone.utc) - (stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc))).days
+    short = expected is not None and len(rows) < int(expected)
+    if short or (age is not None and age > window):
+        log.warning('{"event":"reactivate_incomplete","doc_key":"%s","rows":%d,"chunks":%s,"age_days":%s,'
+                    '"retention_days":%d,"reason":"%s"}', doc_key, len(rows),
+                    "null" if expected is None else int(expected), "null" if age is None else age, window,
+                    "fewer rows than the claim counted" if short else "retired longer ago than the undo window")
+        return None
+    n, batch, pending = 0, db.batch(), 0
+    for snap in rows:
+        batch.update(snap.reference, {"current": True, "superseded_by": firestore.DELETE_FIELD,
+                                      "superseded_at": firestore.DELETE_FIELD,
+                                      "expire_at": firestore.DELETE_FIELD,
+                                      "effective_to": firestore.DELETE_FIELD,
+                                      "reactivated_at": firestore.SERVER_TIMESTAMP})
+        n += 1
+        pending += 1
+        if pending == BATCH:
+            batch.commit()
+            batch, pending = db.batch(), 0
     if pending:
         batch.commit()
     db.collection("documents").document(doc_key).set(
-        {"status": "indexed", "superseded_by": firestore.DELETE_FIELD,
+        {"status": "indexed", "superseded_by": firestore.DELETE_FIELD, "retired_at": firestore.DELETE_FIELD,
          "reactivated_at": firestore.SERVER_TIMESTAMP}, merge=True)
     return n
 

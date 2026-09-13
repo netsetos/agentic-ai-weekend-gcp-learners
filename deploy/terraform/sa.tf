@@ -53,10 +53,12 @@ resource "google_service_account" "agent" {
 }
 
 # The eval gate's OUTSIDER (4.8's run_eval.check_isolation, and the last check of every smoke
-# test): an account IAM admits - roles/run.invoker on every service - that sits on no roster,
-# so a refusal comes from the roster and not from the network. A fixture, not a service. A
-# service account that plays this part cannot also run a service, which is how the chat
-# service's first live smoke (2026-09-09) found every retrieve refused, as designed.
+# test): an account IAM admits - roles/run.invoker on the services that put a ROSTER between the
+# door and the data, bound per service since 12 September 2026 (the caller graph below) - that
+# sits on no roster, so a refusal comes from the roster and not from the network. A fixture, not
+# a service. A service account that plays this part cannot also run a service, which is how the
+# chat service's first live smoke (2026-09-09) found every retrieve refused, as designed. It is
+# never admitted to the peer (documind-agent): the peer has no roster to refuse it with.
 resource "google_service_account" "outsider" {
   account_id   = "documind-outsider-sa"
   display_name = "DocuMind eval outsider (IAM admits it, no roster does)"
@@ -78,6 +80,44 @@ resource "google_service_account_iam_member" "api_self_impersonate" {
   member             = "serviceAccount:${google_service_account.api.email}"
 }
 
+# ---------------------------------------------------------------------------------------------
+# Who may invoke whom: the caller graph (12 September 2026, P2.1 of the production plan).
+#
+# roles/run.invoker is not granted in this file any more. It was - at PROJECT scope, to ui, chat,
+# mcp, outsider and agent - and the comment on each of those lines already said the right answer:
+# narrow it per service. The services are created by `gcloud run deploy` in commands/lesson-*.sh,
+# not by Terraform, so the binding that tells the truth is the callee's own, in the script that
+# deploys it, for exactly the callers that reach it:
+#
+#     gcloud run services add-iam-policy-binding <service> --member=serviceAccount:<caller> \
+#       --role=roles/run.invoker
+#
+# (the shape lesson-8.4.sh and the Makefile's deploy-gateway already used). What project scope
+# cost: every one of those identities could knock on every service, and documind-agent verifies
+# nobody itself - IAM is its door, and it speaks to the lane as documind-agent-sa, on acme's
+# roster - so the eval gate's outsider, admitted "everywhere", could read acme's documents through
+# the peer. The gate check_authz.py parses the five lines below and the five scripts, and fails
+# when they disagree.
+#
+#   documind-api    <- documind-ui-sa, documind-chat-sa, documind-mcp-sa, documind-outsider-sa  (lesson-12.2.sh)
+#   documind-chat   <- documind-ui-sa, documind-outsider-sa                                     (lesson-12.8.sh)
+#   documind-mcp    <- documind-ui-sa, documind-agent-sa, documind-outsider-sa                  (lesson-7.2.sh)
+#   documind-agent  <- documind-ui-sa, documind-chat-sa                                         (lesson-8.4.sh)
+#   documind-ui     <- IAP's service agent, service-NUMBER@gcp-sa-iap                           (lesson-12.4.sh)
+#
+# Each edge, from the code. The UI calls the API (frontend/chat.py, documents.py, studio.py:
+# RAG_API_URL) and the chat service's brains (chat.py: CHAT_URL). chat-sa and mcp-sa reach the API
+# through the ONE retrieve() (shared/documind_tools, RAG_API_URL) and nothing else - the chat
+# service has no MCP_URL. The peer knows one URL (agent/agent.py: MCP_URL) and never the API's.
+# ui-sa is on the MCP server and the peer because the operators mint as it for every smoke and for
+# 7.3's and 8.4's notebooks (make smoke-mcp, make smoke-agent); chat-sa on the peer is 8.4's. The
+# outsider is bound where a ROSTER answers - the API (run_eval.check_isolation, make eval-live), the
+# chat service (make smoke-chat) and the MCP server (7.2's outsider call, make smoke-mcp): each
+# verifies the token with shared/iap.identity and then refuses it by the roster, which is the
+# refusal the gate is testing for. It is never bound on the peer, which has no roster to refuse it
+# with. A person reaches the UI through IAP alone (lesson-12.4.sh binds IAP's service agent, and
+# nothing else invokes it).
+# ---------------------------------------------------------------------------------------------
 locals {
   ui_roles = [
     "roles/aiplatform.user",
@@ -85,10 +125,11 @@ locals {
     "roles/secretmanager.secretAccessor",
     "roles/datastore.user",
     "roles/speech.editor",
-    # Without this the frontend cannot call rag-api at all - 12.4's entire chat
-    # path is a 403 until it exists. Narrow it to the rag-api service with a
-    # google_cloud_run_v2_service_iam_member once the service is Terraform-managed.
-    "roles/run.invoker",
+    # NOT roles/run.invoker (12 September 2026). It was here, project-wide, with a note to narrow
+    # it per service - and project-wide meant the UI's account could knock on every service in the
+    # project. The API and the chat service bind it themselves (lesson-12.2.sh, lesson-12.8.sh),
+    # and so do the MCP server and the peer, for the operators who mint as this account
+    # (lesson-7.2.sh, lesson-8.4.sh). The caller graph above is the list.
     # NO BigQuery roles here, deliberately. The frontend used to carry a second
     # admin dashboard that queried the warehouse directly; it is now a link to the
     # admin service, which runs under admin-sa. Granting ui-sa bigquery.dataViewer
@@ -165,7 +206,8 @@ locals {
   chat_roles = [
     "roles/aiplatform.user",   # Gemini through langchain-google-genai (shared/profile.py)
     "roles/datastore.user",    # the tenant roster (shared/tenancy.py)
-    "roles/run.invoker",       # rag-api, through the ONE retrieve() - narrow it per service once Terraform-managed
+    # rag-api, through the ONE retrieve(): roles/run.invoker on documind-api, bound in lesson-12.2.sh
+    # since 12 September 2026 - not here, not project-wide (the caller graph above).
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
     # secretmanager.secretAccessor and cloudsql.client are granted in cloudsql.tf, on the one
@@ -173,19 +215,24 @@ locals {
   ]
 
   mcp_roles = [
-    "roles/run.invoker",       # rag-api, through the ONE retrieve() - narrow it per service once Terraform-managed
+    # rag-api, through the ONE retrieve(): roles/run.invoker on documind-api, bound in lesson-12.2.sh
+    # since 12 September 2026 - not here, not project-wide (the caller graph above).
     "roles/datastore.viewer",  # the roster (tenancy), the ingest claims and chunk counts - reads only
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
     "roles/storage.objectCreator",   # audit rows, when AUDIT_BUCKET is set (full profile)
   ]
 
-  outsider_roles = [
-    "roles/run.invoker",       # may knock on every service; nothing else, and no roster
-  ]
+  # Nothing at project scope (12 September 2026). "May knock on every service" was the one role
+  # here, and every service included the peer, which cannot refuse anybody by a roster. The
+  # outsider's invoker is bound on the three services it is meant to knock on (lesson-12.2.sh,
+  # lesson-12.8.sh, lesson-7.2.sh - the caller graph above). The empty list keeps the resource
+  # below honest: `terraform apply` removes the project grant it used to manage.
+  outsider_roles = []
 
   agent_roles = [
-    "roles/run.invoker",       # documind-mcp, and only that - narrow it per service once Terraform-managed
+    # documind-mcp, and only that: roles/run.invoker bound on the MCP server in lesson-7.2.sh since
+    # 12 September 2026 - not here, where "only that" was a comment and the grant was project-wide.
     "roles/aiplatform.user",   # Gemini, through ADK
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",

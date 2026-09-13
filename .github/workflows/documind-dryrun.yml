@@ -9,17 +9,25 @@ name: DocuMind dry run (Tier A)
 # The live rehearsal (terraform apply + real deploy + smoke) is deliberately
 # NOT here: it costs money and needs a real project. Run it by hand with the
 # Makefile (make plan / up / smoke / down). See deploy/README.md.
+#
+# Since 12 September 2026 it also runs every offline gate under tools/check_*.py,
+# and it runs for every notebook in the course, not only Module 12's: the gates
+# read Modules 4 to 8 too (the lane rules, the pasted blocks, the corpus), so a
+# PR that touches a Module 4 notebook used to reach main unchecked. None of them
+# needs a project, gcloud or a .env.
 
 on:
   push:
     paths:
       - "deploy/**"
-      - "Module 12/**/*.ipynb"
+      - "Module */**/*.ipynb"
+      - "tools/**"
       - ".github/workflows/documind-dryrun.yml"
   pull_request:
     paths:
       - "deploy/**"
-      - "Module 12/**/*.ipynb"
+      - "Module */**/*.ipynb"
+      - "tools/**"
       - ".github/workflows/documind-dryrun.yml"
   workflow_dispatch:
 
@@ -32,6 +40,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # What the gates import, directly or through the kit code they load: the answer
+      # contract is pydantic (shared/documind_schemas.py), the tool layer calls requests
+      # (shared/documind_tools.py), judge.py reads pandas, fetch_real.py reads pypdf.
+      # Everything else they need is the standard library.
+      - name: The gates' imports
+        run: pip install pydantic pandas pypdf requests
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -55,3 +70,34 @@ jobs:
       # documind-cd.yml, keylessly.
       - name: Eval gate (offline)
         run: python deploy/evals/run_eval.py
+
+      # ---- the offline gates (12 September 2026). Each fails on the defect it was written for,
+      # with fakes at the seam and no credential. check_local_lane.py is red today on a content
+      # floor (the refusal and isolation rows: 4 of 18 refused, floor 0.3) and stays in the list
+      # unmarked - a red gate is the signal, not a nuisance to continue past.
+      - name: Gate - auth wiring (one credential on the wire, the tenant filter, the assertion)
+        run: python tools/check_auth_wiring.py
+      - name: Gate - the lane contract (one RAGAnswer, one collection, every query tenant-filtered)
+        run: python tools/check_contract.py
+      - name: Gate - lanes (the notebooks run what the kit ships)
+        run: python tools/check_lanes.py
+      - name: Gate - media contract (figure and segment citations)
+        run: python tools/check_media_contract.py
+      - name: Gate - graph backends (the walk, tenants apart, one tenant erased)
+        run: python tools/check_graph_backends.py
+      - name: Gate - one retrieval implementation under deploy/
+        run: python tools/check_one_retrieval.py
+      - name: Gate - the real corpus (every golden figure survives chunking)
+        run: python tools/check_real_corpus.py
+      - name: Gate - the local lane (the tenant-filtered store, the refusal floor)
+        run: python tools/check_local_lane.py
+      - name: Gate - release safety (smoke-all's status, promotion by name, the audit lock, the sync, this workflow)
+        run: python tools/check_release.py
+      - name: Gate - authorization (each service binds exactly its callers)
+        run: python tools/check_authz.py
+      - name: Gate - the document lifecycle (the tombstone, the verified undo, the released claim)
+        run: python tools/check_lifecycle.py
+      - name: Gate - retrieval (the same predicates on every path, the bounded reranker, the packed set)
+        run: python tools/check_retrieval.py
+      - name: Gate - the evaluator (the scorer against a fake API)
+        run: python tools/check_eval_gate.py

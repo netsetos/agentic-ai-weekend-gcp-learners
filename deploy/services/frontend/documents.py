@@ -82,7 +82,17 @@ def versions_section(tenant_id: str) -> None:
 
 def documents_page(user):
     st.title("📄 Documents")
-    versions_section(tenant_for(user["email"]))
+    # The tenant ONCE, before anything is rendered or stored, and a stop when there is none - the
+    # gate chat.py and studio.py already have. Until 12 September 2026 this page asked tenant_for()
+    # twice and never looked at the answer: a signed-in person on no roster filed every document
+    # under "None/<file>", and the ingest worker indexed a tenant called None (12.5, contracts.py).
+    # IAP says who you are; only the roster says where your documents go.
+    tenant_id = tenant_for(user["email"])
+    if not tenant_id:
+        st.error("Your account is not a member of any DocuMind tenant. "
+                 "Ask an administrator to add you.")
+        st.stop()
+    versions_section(tenant_id)
     # Documents AND media (9.4 / 9.6): an image, a video or a recording is a document to the
     # ingest worker - it is described, not parsed, and its caption or segments join the same
     # chunks the text does. The list is what the worker's MEDIA_TYPES and parser accept.
@@ -103,7 +113,7 @@ def documents_page(user):
                 # segment of the object it is told about (12.5, contracts.py), exactly as
                 # evals/upload.sh names the corpus. The earlier `tenants/{tenant}/{id}/`
                 # shape filed every upload from this page under a tenant called "tenants".
-                blob = BUCKET.blob(f"{tenant_for(user['email'])}/{f.name}")
+                blob = BUCKET.blob(f"{tenant_id}/{f.name}")
                 blob.chunk_size = 8 * 1024 * 1024
                 # content_type is what the worker keys its media branch on - the notification
                 # carries it; the extension is never consulted.

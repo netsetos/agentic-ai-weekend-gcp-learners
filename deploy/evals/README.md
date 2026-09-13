@@ -124,10 +124,10 @@ lists the rendered assets as `supplied_by: make media`; `acme/whiteboard_arch.pn
 of a hand-drawn architecture sketch, is still the owner's to supply. Check no real faces, voices
 or colleagues are in anything you record.
 
-## golden.jsonl — 64 rows
+## golden.jsonl — 65 rows
 
 Lesson 4.7's schema, unchanged: `{id, shape, question, tenant, must_contain, must_retrieve,
-answerable}`, `shape ∈ {lookup, join, refusal, isolation}`.
+answerable}`, `shape ∈ {lookup, join, refusal, isolation, version}`.
 
 | Shape | Rows | What it tests |
 |---|---|---|
@@ -135,6 +135,11 @@ answerable}`, `shape ∈ {lookup, join, refusal, isolation}`.
 | join | 11 | two clauses, so packing order and budget matter — `jn-08` spans the amending Act and the principal Act it amends; `jn-10` the 1972 Gratuity Act's five years and the 2020 Code's pro-rata rule for fixed-term employees |
 | refusal | 8 | the corpus does not contain it; saying so is the right answer — `rf-07` asks a GST rate the Act leaves to notifications; `mm-05` a Figure 7 the report never references |
 | isolation | 11 | **release blockers** — a failure is a data leak, not a quality regression; `mm-04` asks Zeta about ACME's town hall |
+| version | 1 | the ledger's row (12.5, `deploy/INDEXING.md`): `vr-01` asks the notice period like `lk-06` and adds `must_not_contain: ["90 days"]` — revision 2 of the handbook (`evals/demo/hr_policy_2026_v2.md`) says 90; when the handbook is re-issued, this row and `lk-06` move to 90 in the same commit as the corpus, and the red gate in between is the demo (`make reindex` runs the offline gate first). A `version` row that cites a retired figure blocks on its own |
+
+`required.json` beside it is the manifest of ids that must exist and must individually pass — every `version` and
+`isolation` row and every `must_cite_kind` row. Offline, a listed id missing from `golden.jsonl` fails coverage;
+live, a listed row that errors or fails blocks the release on its own, whatever the rates say.
 
 The clause ids (`EXP-12`, `LV-01`, `PB-02`, `NP-03`, `LV-07`, `PR-05`, `IT-SEC-04`) and the
 document slugs are the anchors `must_retrieve` names, and they are substrings of the chunk ids
@@ -149,7 +154,8 @@ The five `mm-` rows (Module 9) carry `must_cite_kind`: `figure` or `segment`. Of
 verified like every other row, against the text the media was drawn from - Figure 3 from the
 AR-02 table, page 30 from the Act's mirror, the town hall from its committed script. Live,
 `run_eval.py` also reports how many of them came back with a citation of that kind, beside the
-five thresholds and outside them: the figure is only there once `make media` and
+other thresholds: since 12 September `media_kind_rate` (0.80) is one of them, judged only when a media row is in
+scope, and its 0 still means what it meant - the figure is only there once `make media` and
 `make ingest-corpus` have run, and a missing figure is a corpus state, not a model regression.
 
 ### `must_not_contain`

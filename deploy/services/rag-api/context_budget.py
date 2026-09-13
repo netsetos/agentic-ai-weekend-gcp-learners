@@ -11,6 +11,9 @@ from typing import Callable
 
 @dataclass(frozen=True)
 class TokenBudget:
+    """The lines of one request's input, in tokens. The defaults are 4.5's teaching split; the API builds
+    its own with fit() from the configured total (generator.py, 12 September 2026 - until then this class
+    was imported by nothing, and the whole total went to the chunks with the prompt's fixed parts on top)."""
     system: int = 1_500
     tenant_pack: int = 40_000   # stable prefix, cached (see cache_manager.py)
     chunks: int = 6_000         # retrieved evidence, packed most-relevant-first
@@ -20,6 +23,18 @@ class TokenBudget:
     @property
     def input_total(self) -> int:
         return self.system + self.tenant_pack + self.chunks + self.history
+
+    @classmethod
+    def fit(cls, total: int, fixed: str, count_fn: Callable[[str], int] | None = None,
+            answer: int = 0) -> "TokenBudget":
+        """The budget for one request inside `total` input tokens: the fixed text - the system prompt,
+        the question, the scaffolding between them - is counted with count_fn (estimate_tokens unless a
+        real counter such as client.models.count_tokens is injected) and the chunks get what is left,
+        never less than zero. tenant_pack and history are 0 here: the API's tenant pack is a context
+        cache the model counts on its own side, and the API keeps no history. input_total is then at
+        most `total` by construction, which is the promise pack_chunks alone could not keep."""
+        n = (count_fn or estimate_tokens)(fixed)
+        return cls(system=n, tenant_pack=0, chunks=max(0, total - n), history=0, answer=answer)
 
 
 def estimate_tokens(text: str) -> int:

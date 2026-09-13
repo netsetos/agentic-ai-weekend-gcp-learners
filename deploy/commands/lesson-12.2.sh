@@ -39,9 +39,20 @@ gcloud run deploy documind-api \
   --min-instances=0 --max-instances=20 \
   --cpu-boost --execution-environment=gen2 \
   --service-account=documind-api-sa@$PROJECT.iam.gserviceaccount.com \
-  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RETRIEVAL_BACKEND=${RETRIEVAL_BACKEND:-firestore}|VECTOR_INDEX_ENDPOINT=$VECTOR_INDEX_ENDPOINT|VECTOR_DEPLOYED_INDEX_ID=$VECTOR_DEPLOYED_INDEX_ID|SELF_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-ui,/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-chat|DEMO_MODE=${DEMO_MODE-1}|UPLOAD_BUCKET=$PROJECT-uploads|MEDIA_BUCKET=$PROJECT-media|AUDIT_BUCKET=$PROJECT-audit|GENERATOR_MODEL=${GENERATOR_MODEL-gemini-3.6-flash}|RAG_MODEL_BASE=${RAG_MODEL_BASE-gemini-3.6-flash}|ROUTING=${ROUTING-off}|BUDGET_USD=${BUDGET_USD-100}${SPEND_PCT:+|SPEND_PCT=$SPEND_PCT}|MODEL_BACKEND=${MODEL_BACKEND-vertex}|LITELLM_URL=https://documind-gateway-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|ARMOR=${ARMOR-off}|ARMOR_LOCATION=${ARMOR_LOCATION-asia-south1}|ARMOR_TEMPLATE=${ARMOR_TEMPLATE-documind-guard}|RETRIEVAL_CURRENT_ONLY=${RETRIEVAL_CURRENT_ONLY-off}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}|GIT_SHA=$GIT_SHA" \
+  --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|RETRIEVAL_BACKEND=${RETRIEVAL_BACKEND:-firestore}|VECTOR_INDEX_ENDPOINT=$VECTOR_INDEX_ENDPOINT|VECTOR_DEPLOYED_INDEX_ID=$VECTOR_DEPLOYED_INDEX_ID|SELF_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-ui,/projects/$PROJECT_NUMBER/locations/${REGION:-us-central1}/services/documind-chat|DEMO_MODE=${DEMO_MODE-1}|UPLOAD_BUCKET=$PROJECT-uploads|MEDIA_BUCKET=$PROJECT-media|AUDIT_BUCKET=$PROJECT-audit|GENERATOR_MODEL=${GENERATOR_MODEL-gemini-3.6-flash}|RAG_MODEL_BASE=${RAG_MODEL_BASE-gemini-3.6-flash}|ROUTING=${ROUTING-off}|BUDGET_USD=${BUDGET_USD-100}${SPEND_PCT:+|SPEND_PCT=$SPEND_PCT}|MODEL_BACKEND=${MODEL_BACKEND-vertex}|LITELLM_URL=https://documind-gateway-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|ARMOR=${ARMOR-off}|ARMOR_LOCATION=${ARMOR_LOCATION-asia-south1}|ARMOR_TEMPLATE=${ARMOR_TEMPLATE-documind-guard}|SEMANTIC_CACHE=${SEMANTIC_CACHE-off}|RETRIEVAL_CURRENT_ONLY=${RETRIEVAL_CURRENT_ONLY-off}|EMBEDDING_MODEL=${EMBEDDING_MODEL-text-embedding-005}|EMBEDDING_VERSION=${EMBEDDING_VERSION-1}|GIT_SHA=$GIT_SHA" \
   --vpc-connector=projects/$PROJECT/locations/${REGION:-us-central1}/connectors/documind-vpc \
   --vpc-egress=private-ranges-only
+
+# Who may KNOCK (12 September 2026): roles/run.invoker on THIS service, for the four identities that reach it,
+# and no longer project-wide in sa.tf - project-wide admitted every one of them to every service, the A2A peer
+# included. The UI's account streams answers and runs the smoke below; chat-sa and mcp-sa arrive through the
+# ONE retrieve(); the outsider is the eval gate's fixture, admitted so that its refusal is the roster's 403 and
+# not the network's. sa.tf's caller graph is the list, and the gate check_authz.py compares this loop with it.
+for who in documind-ui-sa documind-chat-sa documind-mcp-sa documind-outsider-sa; do
+  gcloud run services add-iam-policy-binding documind-api \
+    --region=${REGION:-us-central1} --project=$PROJECT \
+    --member="serviceAccount:$who@$PROJECT.iam.gserviceaccount.com" --role=roles/run.invoker --quiet
+done
 
 # ---- SMOKE ----
 # Get an identity token (not your user token) because --no-allow-unauthenticated

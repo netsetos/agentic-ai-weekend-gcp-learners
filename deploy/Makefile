@@ -15,7 +15,8 @@
 #                                                   the managed tuning job, a no-traffic revision for the A/B
 #     make eval-live PROJECT=... [SOURCE=<doc>]     the golden set against the deployed API (scoped to one document's rows)
 #     make reindex FILE= NAME= / sources / purge     the document lifecycle (deploy/INDEXING.md); smoke-reindex smokes it
-#     make down  PROJECT=...                        destroy everything (no cost bleed)
+#     make retire / restore SOURCE=                 withdraw a document (a tombstone the nightly walk honours), bring it back
+#     make down  PROJECT=...                        the services, then terraform destroy; names what only project deletion removes
 #
 # PROFILE=lean (the default) is the Module 4 lane: the API, the UI and the ingest worker on
 # Cloud Run, Firestore with its vector indexes, one Document AI processor, the uploads bucket -
@@ -85,6 +86,7 @@ GATEWAY_CONFIG  ?= config.lean.yaml
 ROUTER_ENFORCE  ?= 1
 # Module 12: the guard is a switch (12.6) and the pipeline's ref is a variable (12.7)
 ARMOR           ?= off
+SEMANTIC_CACHE  ?= off
 DEPLOY_REF      ?= refs/heads/main
 # 12.5's ledger (11 September 2026): the API retrieves only chunks the ledger marks current - after the second
 # vector index is built and make backfill-current has run; RECONCILE_JOB=true schedules the nightly reconcile
@@ -157,8 +159,8 @@ SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-
         trainset cache judge tune candidate \
         deploy-gateway gateway-off smoke-gateway smoke-slm build-vllm deploy-vllm vllm-off gke-up gke-down compare \
         gpu-quota gpu-cap gpu-cap-off off off-now \
-        release-candidate promote rollback smoke-all usage ingest-one poison dlq \
-        reindex retire reconcile reconcile-job backfill-current sources purge smoke-reindex
+        release-candidate record-candidate promote rollback smoke-all usage ingest-one poison dlq down-services \
+        reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -272,9 +274,10 @@ build: guard-project
 # deterministic run.app URLs and the IAP audiences, the processor terraform created, and -
 # in the full profile - the Vector Search names. In the lean profile RETRIEVAL_BACKEND is
 # firestore and the vector variables are empty on purpose.
-# After the API's DEPLOY block, traffic goes to the LATEST revision explicitly: make candidate's --no-traffic
-# pins the service to a named revision, and Cloud Run then leaves every later deploy at 0% - the routing
-# flip on 10 September ran on the old revision for an hour before anyone read status.traffic (F44).
+# After the API's DEPLOY block, traffic goes to the revision that block just created, explicitly: make candidate's
+# --no-traffic pins the service to a named revision, and Cloud Run then leaves every later deploy at 0% - the routing
+# flip on 10 September ran on the old revision for an hour before anyone read status.traffic (F44). By NAME, read
+# from status.latestCreatedRevisionName, never "the latest revision" (12 September 2026): the flip names what it moved to.
 deploy-services: guard-project
 	@[ -n "$(SCRIPTS_$(PROFILE))" ] || (echo "ERROR: PROFILE='$(PROFILE)' names no deploy scripts (lean | full)"; exit 1)
 	@set -e; \
@@ -308,15 +311,16 @@ deploy-services: guard-project
 	  VECTOR_DEPLOYED_INDEX_ID=$$VECTOR_DEPLOYED_INDEX_ID VECTOR_INDEX_NAME=$$VECTOR_INDEX_NAME \
 	  BQ_CHUNK_TABLE=$$BQ_CHUNK_TABLE CHAT_URL=$$CHAT_URL \
 	  CHAT_SQL_FLAGS="$$CHAT_SQL_FLAGS" CHAT_EXTRA_ENV="$$CHAT_EXTRA_ENV" \
-	  GENERATOR_MODEL=$(GENERATOR_MODEL) RAG_MODEL_BASE=$(RAG_MODEL_BASE) ROUTING=$(ROUTING) MODEL_BACKEND=$(MODEL_BACKEND) ARMOR=$(ARMOR) \
+	  GENERATOR_MODEL=$(GENERATOR_MODEL) RAG_MODEL_BASE=$(RAG_MODEL_BASE) ROUTING=$(ROUTING) MODEL_BACKEND=$(MODEL_BACKEND) ARMOR=$(ARMOR) SEMANTIC_CACHE=$(SEMANTIC_CACHE) \
   RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY) \
 	  RETENTION_DAYS=$$RETENTION_DAYS EMBEDDING_MODEL=$$EMBEDDING_MODEL EMBEDDING_VERSION=$$EMBEDDING_VERSION \
 	  BUDGET_USD=$(BUDGET_USD) SPEND_PCT=$(SPEND_PCT) \
 	  sh -ec "$$(sed -n '/^# ---- DEPLOY ----/,/^# ---- [A-Z_]* ----$$/p' $$f | grep -v '^# ----')"; \
 	done
 	@if echo "$(SCRIPTS_$(PROFILE))" | grep -q lesson-12.2.sh; then \
-	  gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-latest --quiet >/dev/null 2>&1 \
-	    && echo ">> documind-api: 100% of traffic to the latest revision (a candidate tag had pinned it - F44)"; fi
+	  REV=$$(gcloud run services describe documind-api --region $(REGION) --project $(PROJECT) --format='value(status.latestCreatedRevisionName)'); \
+	  gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-revisions $$REV=100 --quiet >/dev/null 2>&1 \
+	    && echo ">> documind-api: 100% of traffic to $$REV, the revision this deploy created (a candidate tag had pinned it - F44)"; fi
 	$(MAKE) operators
 
 # The people who operate this deployment mint identity tokens AS the UI's service account
@@ -394,6 +398,8 @@ media:
 # identity is the UI's service account, which `make roster` must have put on the tenants
 # the golden set asks - the same rule the smoke test states.
 #   make eval-live PROJECT=...            or   make eval-live API=https://... DOCUMIND_ID_TOKEN=...
+# REPORT=evals/reports/<name>.json writes every row's verdict, latency, stages and cache_hit (12 September 2026):
+# the demo reads that file, and evals/reports/ is gitignored.
 # The token's audience is the SERVICE's canonical URL whichever of its URLs is called - the API verifies
 # bearer tokens against SELF_URL, and a token minted for a candidate's tag URL (make candidate) was refused
 # with 401 on all 64 rows (F42). API= picks the URL to call; the audience does not move with it.
@@ -405,7 +411,7 @@ eval-live: guard-project
 	OUTSIDER=$${DOCUMIND_OUTSIDER_TOKEN:-$$(gcloud auth print-identity-token --include-email \
 	  --impersonate-service-account=documind-outsider-sa@$(PROJECT).iam.gserviceaccount.com --audiences=$$AUD)}; \
 	echo ">> $$API"; DOCUMIND_ID_TOKEN=$$TOKEN DOCUMIND_OUTSIDER_TOKEN=$$OUTSIDER \
-	  $(PY) evals/run_eval.py --api-url $$API $(if $(SOURCE),--source $(SOURCE),)
+	  $(PY) evals/run_eval.py --api-url $$API $(if $(SOURCE),--source $(SOURCE),) $(if $(REPORT),--report $(REPORT),)
 
 # The ablation harness (4.8, Part 5): retrieval only, no model in the loop, one knob per arm -
 # the lane's dense 20 -> rerank 5 against the same without the reranker, a deeper candidate
@@ -417,6 +423,9 @@ ablate: guard-project
 
 # The SQL that terraform does not own. tenant_daily is a VIEW over the log sink (12.3) and
 # was, until 2026-09-05, applied by nobody - the file existed and the view did not.
+# The view reads fields the API logs (12.2's usage_row), and BigQuery types a sink table's jsonPayload
+# from the rows it has seen: run this after an API at this version has answered once (make smoke), or
+# the CREATE fails on "Field name retrieve_ms does not exist" - a refusal, never a column of NULLs.
 bq-views: guard-project
 	bq --project_id=$(PROJECT) query --use_legacy_sql=false < terraform/sql/tenant_daily.sql
 
@@ -477,7 +486,8 @@ tune: guard-project
 #   make eval-live API=https://candidate---documind-api-NUMBER.us-central1.run.app
 candidate: guard-project
 	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --no-traffic --tag candidate \
-	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
+	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
+	@$(MAKE) --no-print-directory record-candidate PROJECT=$(PROJECT) REGION=$(REGION)
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	echo ">> candidate: https://candidate---documind-api-$$NUMBER.$(REGION).run.app (no traffic; remove with gcloud run services update-traffic documind-api --remove-tags candidate)"
 
@@ -540,11 +550,39 @@ chat-local:
 # variable before it touches a resource, so passing two of five made `make down` fail at
 # variable resolution and destroy nothing. It also has to init: a fresh clone has no
 # .terraform/ and no backend, so destroy would have had no state to read.
-down: guard-project
-	cd $(TF_DIR) && $(TF_INIT) && \
-	  terraform destroy -input=false -auto-approve $(TF_VARS)
-	@echo ">> Also delete the throwaway project to stop all billing:"
-	@echo ">>   gcloud projects delete $(PROJECT)"
+# down-services goes first (12 September 2026): the services are not in the state, and the VPC connector they sit on
+# cannot go while they use it. Then what only deleting the project removes, printed whether or not destroy got
+# through - a used lab's buckets hold objects and force_destroy is false, so destroy stops on them and says so.
+down: guard-project down-services
+	@rc=0; (cd $(TF_DIR) && $(TF_INIT) && terraform destroy -input=false -auto-approve $(TF_VARS)) || rc=$$?; \
+	echo ">> make down cannot remove these; only deleting the project does:"; \
+	echo ">>   Firestore (default): delete_protection_state = DELETE_PROTECTION_ENABLED (firestore.tf) - chunks, ledger, rosters stay"; \
+	echo ">>   buckets that hold objects: uploads, datasets, audit (force_destroy = false, storage.tf) - and on the full profile the audit bucket's LOCKED retention policy blocks even the project's deletion for five years, by design"; \
+	echo ">>   a tuned endpoint from make tune (evals/tune.py: Vertex AI, not Terraform)"; \
+	echo ">>   the BigQuery views make bq-views applied (terraform/sql/*.sql, through bq, not Terraform)"; \
+	echo ">> Delete the throwaway project to stop all billing:"; \
+	echo ">>   gcloud projects delete $(PROJECT)"; exit $$rc
+
+# ---------- Teardown (12 September 2026): what terraform destroy does not own ----------
+# The seven services the deploy scripts create with gcloud run deploy (commands/lesson-*.sh; not Terraform resources,
+# so make down left them running and billing their floors), the candidate tag, and the tenants' context caches
+# (cache_admin.py delete - a cache bills its storage by the hour until it is deleted). Module 11's three, when they
+# were deployed (make deploy-gateway / deploy-slm / deploy-vllm), go the same way. Best effort: every resource is its
+# own || line, so an absent one never stops the next, and each echo says what happened.
+DOWN_SERVICES     = documind-ingest documind-api documind-admin documind-ui documind-chat documind-mcp documind-agent
+DOWN_SERVICES_M11 = documind-gateway
+DOWN_SERVICES_GPU = documind-slm documind-vllm
+down-services: guard-project
+	@for t in acme zeta globex; do \
+	  (cd services/rag-api && GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) cache_admin.py delete --project $(PROJECT) --tenant $$t 2>/dev/null) \
+	    || echo ">> cache $$t: nothing deleted (no cache, or no google-genai / credentials in this shell)"; done
+	@gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --remove-tags candidate --quiet >/dev/null 2>&1 \
+	  && echo ">> candidate tag removed" || echo ">> candidate tag: none to remove"
+	@for s in $(DOWN_SERVICES) $(DOWN_SERVICES_M11); do \
+	  gcloud run services delete $$s --region $(REGION) --project $(PROJECT) --quiet >/dev/null 2>&1 && echo ">> deleted $$s" || echo ">> $$s: absent"; done
+	@for s in $(DOWN_SERVICES_GPU); do \
+	  gcloud run services delete $$s --region $(SLM_REGION) --project $(PROJECT) --quiet >/dev/null 2>&1 && echo ">> deleted $$s" || echo ">> $$s: absent"; done
+	@rm -f .candidate-revision .previous-revision
 
 # SLM_REGION is deliberately NOT $(REGION)-bound to Mumbai: Cloud Run L4 in asia-south1 is
 # INVITATION-ONLY (11.1). us-central1 is the self-serve default; asia-south2 (Delhi) has
@@ -698,30 +736,61 @@ off-now: guard-project
 # 12.7's release unit. make build pushed api:$(GIT_SHA); this puts that image on a no-traffic revision tagged candidate,
 # make eval-live API=<its URL> judges it, make promote moves traffic - and make rollback moves it back. Module 10's
 # candidate target flips ENV on the current image; this one flips the IMAGE, which is what a release is.
+# BY NAME (12 September 2026): the revision this makes is recorded in .candidate-revision (gitignored) and promote
+# moves traffic to that name - never "the latest revision", which promotes whatever is newest: two candidates in flight, or a
+# make up between the gate and the flip, and it would have promoted a revision the gate never judged. GIT_SHA goes on
+# the revision too: env vars merge across revisions (F43), so an image-only update left /version naming the OLD sha,
+# and the workflow now refuses a candidate that does not answer as the tag it releases.
 release-candidate: guard-project
-	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --image $(IMAGE_REPO)/api:$(GIT_SHA) --no-traffic --tag candidate --quiet
+	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --image $(IMAGE_REPO)/api:$(GIT_SHA) --no-traffic --tag candidate --update-env-vars GIT_SHA=$(GIT_SHA) --quiet
+	@$(MAKE) --no-print-directory record-candidate PROJECT=$(PROJECT) REGION=$(REGION)
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	echo ">> candidate: https://candidate---documind-api-$$NUMBER.$(REGION).run.app  (make eval-live API=that, then make promote)"
 
-promote: guard-project
-	gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-latest --quiet
-	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); URL=https://documind-api-$$NUMBER.$(REGION).run.app; \
-	TOKEN=$$(gcloud auth print-identity-token --include-email --impersonate-service-account=documind-ui-sa@$(PROJECT).iam.gserviceaccount.com --audiences=$$URL); \
-	echo ">> live:"; curl -s -H "Authorization: Bearer $$TOKEN" $$URL/version; echo
+# The revision the update just created, by name, into .candidate-revision - the one promote reads. Shared by candidate
+# (Module 10's env flip) and release-candidate (12.7's image flip): both make a no-traffic revision the gate judges.
+record-candidate: guard-project
+	@REV=$$(gcloud run services describe documind-api --region $(REGION) --project $(PROJECT) --format='value(status.latestCreatedRevisionName)'); \
+	[ -n "$$REV" ] || { echo "ERROR: could not read the candidate's name (status.latestCreatedRevisionName of documind-api)"; exit 1; }; \
+	echo "$$REV" > .candidate-revision; echo ">> candidate revision: $$REV (deploy/.candidate-revision - make promote moves traffic to it by name)"
 
-# The revision before the newest, back on 100%. Fifteen seconds; the fastest rollback there is, because that revision
-# never went away. GET /version afterwards says which sha is answering.
+# Traffic to the recorded candidate, by name. Before the flip, the revision serving 100% goes to .previous-revision -
+# the one make rollback returns to. Refuses when the candidate tag has moved on: a newer candidate superseded the one
+# this checkout recorded, and the gate judged that one, not this one.
+promote: guard-project
+	@[ -s .candidate-revision ] || { echo "ERROR: deploy/.candidate-revision is missing - make release-candidate (or make candidate) records the revision it makes, and promote moves traffic to THAT revision by name, never to whatever is newest"; exit 1; }
+	@CAND=$$(cat .candidate-revision); \
+	STATE=$$(gcloud run services describe documind-api --region $(REGION) --project $(PROJECT) --format=json | $(PY) -c "import json,sys; t=json.load(sys.stdin).get('status',{}).get('traffic',[]); s=[x for x in t if x.get('percent')]; s=max(s, key=lambda x: x['percent']) if s else {}; c=[x for x in t if x.get('tag')=='candidate']; print((s.get('revisionName') or '')+'|'+((c[0].get('revisionName') or '') if c else ''))"); \
+	[ -n "$$STATE" ] || { echo "ERROR: could not read documind-api's traffic (gcloud run services describe)"; exit 1; }; \
+	PREV=$${STATE%%|*}; TAGGED=$${STATE##*|}; \
+	if [ -n "$$TAGGED" ] && [ "$$TAGGED" != "$$CAND" ]; then echo "ERROR: the candidate tag is on $$TAGGED but deploy/.candidate-revision names $$CAND - a newer candidate superseded this one, and the gate judged that one; make release-candidate again"; exit 1; fi; \
+	if [ "$$PREV" = "$$CAND" ]; then echo ">> $$CAND already serves 100%"; exit 0; fi; \
+	if [ -n "$$PREV" ]; then echo "$$PREV" > .previous-revision; echo ">> serving before the flip: $$PREV (deploy/.previous-revision - make rollback returns to it)"; fi; \
+	gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-revisions $$CAND=100 --quiet; \
+	NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); URL=https://documind-api-$$NUMBER.$(REGION).run.app; \
+	TOKEN=$$(gcloud auth print-identity-token --include-email --impersonate-service-account=documind-ui-sa@$(PROJECT).iam.gserviceaccount.com --audiences=$$URL); \
+	echo ">> live: $$CAND"; curl -s -H "Authorization: Bearer $$TOKEN" $$URL/version; echo
+
+# Back to the revision that was serving before make promote flipped - recorded by name in .previous-revision, not "the
+# second newest by creation time", which is the wrong revision the moment a newer candidate exists. Fifteen seconds;
+# the fastest rollback there is, because that revision never went away. GET /version afterwards says which sha answers.
 rollback: guard-project
-	@PREV=$$(gcloud run revisions list --service documind-api --region $(REGION) --project $(PROJECT) --sort-by=~metadata.creationTimestamp --format='value(name)' --limit 2 | tail -1); \
+	@[ -s .previous-revision ] || { echo "ERROR: deploy/.previous-revision is missing - make promote records the revision it moved traffic off, and nothing was promoted from this checkout. By hand: gcloud run revisions list --service documind-api --region $(REGION) --project $(PROJECT), then gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-revisions <name>=100"; exit 1; }
+	@PREV=$$(cat .previous-revision); \
 	gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-revisions $$PREV=100 --quiet && echo ">> traffic on $$PREV"
 
 # 12.8's full smoke: the seven smokes in one run, with the exports smoke.py reads. A refusal line is a PASS - a system
 # that answers everybody passes a smoke made only of "does it work?".
+# The smoke's OWN exit status decides (12 September 2026): a pipeline's status is grep's, and grep is satisfied by a
+# FAIL line, so a failing smoke left this target at exit 0 and the release day green. /bin/sh is dash on the runners
+# and has no pipefail, so each smoke writes its status to a file inside the pipeline and the loop reads it after.
 smoke-all: guard-project
-	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); rc=0; \
+	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); rc=0; ST=$$(mktemp); \
 	for t in smoke smoke-mcp smoke-chat smoke-agent smoke-media smoke-reindex smoke-gateway smoke-slm; do echo "== $$t"; \
-	  DOCUMIND_PROJECT=$(PROJECT) DOCUMIND_API_URL=https://documind-api-$$NUMBER.$(REGION).run.app DOCUMIND_TENANT=$(TENANT) \
-	  DOCUMIND_IMPERSONATE_SA=documind-ui-sa@$(PROJECT).iam.gserviceaccount.com $(MAKE) --no-print-directory $$t PROJECT=$(PROJECT) 2>&1 | grep -E "PASS|FAIL|pass|fail|not set" || rc=1; done; exit $$rc
+	  { DOCUMIND_PROJECT=$(PROJECT) DOCUMIND_API_URL=https://documind-api-$$NUMBER.$(REGION).run.app DOCUMIND_TENANT=$(TENANT) \
+	    DOCUMIND_IMPERSONATE_SA=documind-ui-sa@$(PROJECT).iam.gserviceaccount.com $(MAKE) --no-print-directory $$t PROJECT=$(PROJECT) 2>&1; \
+	    echo $$? > $$ST; } | grep -E "PASS|FAIL|pass|fail|not set" || rc=1; \
+	  [ "$$(cat $$ST)" = 0 ] || { rc=1; echo "== $$t: FAILED (exit $$(cat $$ST))"; }; done; rm -f $$ST; exit $$rc
 
 # 12.3 on lean: tenant_daily's GROUP BY over the usage rows in Cloud Logging (evals/usage_rows.py).
 usage: guard-project
@@ -762,11 +831,23 @@ reindex: guard-project
 	    gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND jsonPayload.event=\"ingest_superseded\" AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.retired_doc_keys,jsonPayload.retired_chunks,jsonPayload.expire_days)' | sed 's/^/>> retired (doc_keys, chunks, expire days): /'; \
 	    echo ">> the gate, scoped to this document, on a candidate: make eval-live PROJECT=$(PROJECT) SOURCE=$$OBJ API=<candidate url>"; exit 0; fi; done; echo ">> no ingest line in 5 min - gcloud logging read ... service_name=documind-ingest"; exit 1
 
-# retire a source by hand (SOURCE=acme/old.pdf or a gs:// URI): every current chunk of it is flagged, the ledger
-# row says retired, the tenant's cache record goes. Uploading the bytes again reactivates them.
+# withdraw a source by hand (SOURCE=acme/old.pdf or a gs:// URI): every current chunk of it is flagged with an
+# expire_at and the ledger row says WITHDRAWN (12 September 2026) - a tombstone, not `retired`. The object stays in
+# the bucket, the nightly reconcile leaves it there ("withdrawn, object kept"), the same bytes again are acked
+# (ingest_withdrawn) and never reactivated, the corpus fingerprint moves so the caches follow. Before this the row
+# said retired, and the next night's walk read "retired but back in the bucket" and resurrected what a person had
+# just taken down. make restore is the way back.
 retire: guard-project
 	@test -n "$(SOURCE)" || (echo "SOURCE=<tenant/name or gs://...> is required"; exit 2); \
 	$(PY) services/ingest/reconcile.py --project $(PROJECT) --retire "$(SOURCE)" --apply
+
+# bring a withdrawn source back (SOURCE= as for retire): the tombstone is cleared and the object rewritten onto
+# itself, so the worker's own path returns it - ingest_reactivated inside the RETENTION_DAYS undo window (nothing
+# embedded), ingest_ok as a fresh version after it. Refused, with the reason, for a source that is not withdrawn or
+# whose object is gone from the bucket.
+restore: guard-project
+	@test -n "$(SOURCE)" || (echo "SOURCE=<tenant/name or gs://...> is required"; exit 2); \
+	$(PY) services/ingest/reconcile.py --project $(PROJECT) --restore "$(SOURCE)" --apply
 
 # the full reconciliation: the bucket's current generations against sources/. Prints the plan; APPLY=1 acts.
 reconcile: guard-project

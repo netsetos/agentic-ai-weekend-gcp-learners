@@ -1,5 +1,6 @@
 """The Cloud Run worker behind a Pub/Sub push subscription."""
 import base64
+import io
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from google.genai import types as gtypes
 from google.api_core.exceptions import NotFound
 from google.cloud import firestore, storage
 from pydantic import BaseModel, ValidationError
+from pypdf import PdfReader
 
 # shared/ ships beside the service in the image (see the Dockerfile), the same
 # way services/chat consumes documind_tools.
@@ -21,9 +23,9 @@ from shared.audit_log import emit as audit_emit
 
 from contracts import IngestMessage, DocumentContract, chunk_hash, effective_from_of, sha256_of
 from idempotency import (claim, finish, reactivate, record_source, refresh_fingerprint, release,
-                         retire_previous, stale_generation, status_of, swap_versions)
+                         retire_previous, stale_generation, status_of, swap_versions, withdrawn)
 from indexer import (EMBEDDING_MODEL, EMBEDDING_VERSION, embed_with_carry_over, mirror_to_bigquery,
-                     mirror_to_firestore, remove_datapoints, to_datapoints, upsert)
+                     mirror_to_firestore, remove_datapoints, reupsert, to_datapoints, upsert)
 from parser import parse
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
@@ -98,6 +100,16 @@ def _genai() -> genai.Client:
 
 def _expire_at(days: float) -> datetime:
     return datetime.now(timezone.utc) + timedelta(days=days)
+
+
+def _pdf_pages(content: bytes) -> int | None:
+    """A PDF's page count off its page tree, before any OCR is paid for (12 September 2026). pypdf reads the tree
+    and renders nothing - parser.py already opens the file this way to slice it - and the batch decision needs only
+    the number. None when the bytes will not parse: Doc AI then gets its turn and says what is wrong with them."""
+    try:
+        return len(PdfReader(io.BytesIO(content)).pages)
+    except Exception:  # noqa: BLE001 - a count is a hint for routing, never a verdict on the document
+        return None
 
 
 def _parse(content: bytes, content_type: str) -> tuple[str, int]:
@@ -215,11 +227,23 @@ def _describe_media(gcs_uri: str, content_type: str) -> list[dict]:
              "chunk_hash": chunk_hash(s.summary)} for s in (r.parsed or [])]
 
 
-def _enqueue_batch(doc: DocumentContract) -> None:
-    """The batch lane. A claim document the batch worker polls; no second queue to provision."""
+def _enqueue_batch(doc: DocumentContract, generation: str) -> None:
+    """The batch lane. A claim document a batch worker would poll; no second queue to provision.
+
+    Nothing polls it yet (12 September 2026): no consumer for ingest_batch/ is built, so the document WAITS, and
+    its claim says so - `queued`, not `processing` - which is what keeps a redelivery from being acked as a
+    duplicate and the nightly reconcile from rewriting the object onto itself every night: the worker answers
+    queued_batch, reconcile's plan reports `queued` for that generation and counts it apart from the drift. The
+    log line says the same, at warning, so the wait is visible and not a silent hole in the corpus."""
     _db.collection("ingest_batch").document(doc.doc_key).set({
-        "tenant_id": doc.tenant_id, "gcs_uri": doc.gcs_uri, "pages": doc.pages,
+        "tenant_id": doc.tenant_id, "gcs_uri": doc.gcs_uri, "pages": doc.pages, "generation": str(generation),
         "status": "queued", "queued_at": firestore.SERVER_TIMESTAMP})
+    _db.collection("documents").document(doc.doc_key).set(
+        {"status": "queued", "pages": doc.pages, "generation": str(generation),
+         "queued_at": firestore.SERVER_TIMESTAMP}, merge=True)
+    log.warning(json.dumps({"event": "ingest_queued_batch", "tenant": doc.tenant_id, "doc_key": doc.doc_key,
+                            "gcs_uri": doc.gcs_uri, "pages": doc.pages, "generation": str(generation),
+                            "note": "no consumer for ingest_batch/ is built: the document waits, its claim says queued"}))
 
 
 @app.post("/")
@@ -256,29 +280,53 @@ async def push(request: Request):
     doc = DocumentContract(tenant_id=msg.tenant_id, sha256=sha256_of(content),
                            gcs_uri=msg.gcs_uri, pages=0)
 
-    if not claim(_db, doc.doc_key, doc.gcs_uri):
+    if not claim(_db, doc.doc_key, doc.gcs_uri, doc.tenant_id):
         if status_of(_db, doc.doc_key) == "superseded":
             # THE UNDO (the ledger, 11 September 2026). The same bytes again, after a newer version
             # retired them: the chunks are still here, flagged. Flip them back, retire the newer
             # version in turn, and nothing is re-embedded - because nothing was ever deleted.
+            # Unless a person withdrew the source (12 September 2026): the tombstone holds against a
+            # redelivery and against the same bytes uploaded again; make restore SOURCE= is the way back.
+            if withdrawn(_db, doc.tenant_id, doc.gcs_uri):
+                log.info(json.dumps({"event": "ingest_withdrawn", "tenant": doc.tenant_id, "doc_key": doc.doc_key,
+                                     "gcs_uri": doc.gcs_uri, "generation": msg.generation,
+                                     "hint": "make restore SOURCE= clears the tombstone"}))
+                return {"status": "withdrawn", "doc_key": doc.doc_key}
             back = reactivate(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
-            gone = retire_previous(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key, expire_at=_expire_at(RETENTION_DAYS))
-            if INDEX_NAME and gone["retired_ids"]:
-                remove_datapoints(INDEX_NAME, gone["retired_ids"])
-            record_source(_db, doc.tenant_id, msg.name, doc.gcs_uri, doc.doc_key, msg.generation,
-                          doc.sha256, back, effective_from_of(msg.name, None),
-                          reused=back, embedded=0, retired=gone["retired_chunks"],
-                          embedding_model=EMBEDDING_MODEL, embedding_version=EMBEDDING_VERSION)
-            fingerprint = refresh_fingerprint(_db, doc.tenant_id, "ingest_reactivated")
-            log.info(json.dumps({"event": "ingest_reactivated", "tenant": doc.tenant_id,
-                                 "doc_key": doc.doc_key, "chunks": back, "reused": back, "embedded": 0,
-                                 "retired": gone["retired_chunks"], "retired_doc_keys": gone["retired_doc_keys"],
-                                 "generation": msg.generation, "fingerprint": fingerprint}))
-            return {"status": "reactivated", "doc_key": doc.doc_key, "chunks": back}
-        # Already done by an earlier delivery, or by an earlier upload of the
-        # same bytes. Returning 200 ACKS the message: this is a success, not a
-        # failure, and retrying it would achieve nothing.
-        return {"status": "duplicate", "doc_key": doc.doc_key}
+            if back is not None:
+                # The full profile first (12 September 2026): the ids remove_datapoints() took out go back up from
+                # the rows' own vectors BEFORE the newer version leaves the tier, so a reader there never finds none.
+                if INDEX_NAME:
+                    reupsert(INDEX_NAME, _db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
+                gone = retire_previous(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key, expire_at=_expire_at(RETENTION_DAYS))
+                if INDEX_NAME and gone["retired_ids"]:
+                    remove_datapoints(INDEX_NAME, gone["retired_ids"])
+                record_source(_db, doc.tenant_id, msg.name, doc.gcs_uri, doc.doc_key, msg.generation,
+                              doc.sha256, back, effective_from_of(msg.name, None),
+                              reused=back, embedded=0, retired=gone["retired_chunks"],
+                              embedding_model=EMBEDDING_MODEL, embedding_version=EMBEDDING_VERSION)
+                fingerprint = refresh_fingerprint(_db, doc.tenant_id, "ingest_reactivated")
+                log.info(json.dumps({"event": "ingest_reactivated", "tenant": doc.tenant_id,
+                                     "doc_key": doc.doc_key, "chunks": back, "reused": back, "embedded": 0,
+                                     "retired": gone["retired_chunks"], "retired_doc_keys": gone["retired_doc_keys"],
+                                     "generation": msg.generation, "fingerprint": fingerprint}))
+                return {"status": "reactivated", "doc_key": doc.doc_key, "chunks": back}
+            # THE UNDO REFUSED (12 September 2026): reactivate_incomplete said why - fewer rows than the claim
+            # counted, or a retire stamp past RETENTION_DAYS; the TTL policy has been at the rows. Nothing was
+            # flipped and the newer version is still current. The bytes are here, so take the claim back from its
+            # superseded record and ingest them as a fresh version below: the carry-over reuses every vector the
+            # newer version still holds, and the swap retires it only once the new rows are whole.
+            if not claim(_db, doc.doc_key, doc.gcs_uri, doc.tenant_id, retake=True):
+                return {"status": "duplicate", "doc_key": doc.doc_key}
+        elif status_of(_db, doc.doc_key) == "queued":
+            # Handed to the batch lane by an earlier delivery and still waiting there (no consumer is built):
+            # acked as queued, so the wait is a fact in the log and not a "duplicate" that hides it.
+            return {"status": "queued_batch", "doc_key": doc.doc_key}
+        else:
+            # Already done by an earlier delivery, or by an earlier upload of the
+            # same bytes. Returning 200 ACKS the message: this is a success, not a
+            # failure, and retrying it would achieve nothing.
+            return {"status": "duplicate", "doc_key": doc.doc_key}
 
     gone = {"activated": 0, "retired_doc_keys": [], "retired_ids": [], "retired_chunks": 0}
     counts = {"reused": 0, "embedded": 0}
@@ -297,13 +345,22 @@ async def push(request: Request):
             # image DLP can read and yields nothing here.
             image_findings = pii_inspect_image(content, msg.content_type)
         else:
+            # The batch decision BEFORE Doc AI (12 September 2026): a PDF's page count comes off its page tree
+            # for nothing, and a document the push lane cannot finish must not pay for OCR it will not use -
+            # the first version parsed the whole file and then looked at the count. Anything that is not a
+            # PDF is counted by the parser, as before.
+            pages = _pdf_pages(content) if msg.content_type == "application/pdf" else None
+            if pages is not None and pages > MAX_INLINE_PAGES:
+                doc = doc.model_copy(update={"pages": pages, "effective_from": effective_from_of(msg.name, None)})
+                _enqueue_batch(doc, msg.generation)
+                return {"status": "queued_batch", "pages": pages}
             text, pages = _parse(content, msg.content_type)
             doc = doc.model_copy(update={"pages": pages,
                                         "effective_from": effective_from_of(msg.name, text)})
             if pages > MAX_INLINE_PAGES:
                 # A 400-page contract will not finish inside a push request's
                 # timeout. Hand it to the batch lane and ack.
-                _enqueue_batch(doc)
+                _enqueue_batch(doc, msg.generation)
                 return {"status": "queued_batch", "pages": pages}
             chunks = _chunk(text)
 

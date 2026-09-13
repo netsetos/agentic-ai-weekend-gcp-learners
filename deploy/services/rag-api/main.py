@@ -1,4 +1,5 @@
 import time, json, logging, os, sys
+from contextlib import contextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,8 +8,8 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
-from schemas import QueryRequest, RAGResponse
-from retriever import retrieve, rerank, _fs
+from schemas import QueryRequest, RAGResponse, RAGAnswer, FILTER_KEYS
+from retriever import retrieve, rerank, rerank_fell_back, _fs, embed_query
 from generator import generate, generate_stream, _client as _gen_client
 from config import settings
 from auth import verify_iap, enforce_membership
@@ -16,6 +17,7 @@ from cost import price
 from router import classify
 from breakers import choose_model
 from budget import record, spend_pct
+import semantic_cache                     # 12.6's answer cache, behind SEMANTIC_CACHE=on (the RAG plan, W4)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)  # bare JSON -> Cloud Run jsonPayload
 log = logging.getLogger("documind-api")
@@ -24,6 +26,25 @@ trace.set_tracer_provider(TracerProvider())
 trace.get_tracer_provider().add_span_processor(
     BatchSpanProcessor(CloudTraceSpanExporter(project_id=settings.project_id)))
 tracer = trace.get_tracer(__name__)
+
+
+def _ms(since: float) -> int:
+    return int((time.perf_counter() - since) * 1000)
+
+
+@contextmanager
+def stage(stages: dict, name: str):
+    """One stage of an answer on its own clock AND its own span. A p95 that moved says nothing about
+    which stage moved it, so the row carries retrieve_ms / rerank_ms / generate_ms beside latency_ms
+    (tenant_daily reads them, 12.3; make usage groups them), and the same names are spans in Cloud
+    Trace for the one slow request someone is looking at."""
+    t = time.perf_counter()
+    with tracer.start_as_current_span(name):
+        try:
+            yield
+        finally:
+            stages[f"{name}_ms"] = _ms(t)
+
 
 app = FastAPI(title="DocuMind API", version="1.0.0")
 FastAPIInstrumentor.instrument_app(app)
@@ -104,8 +125,81 @@ def choose_for(req) -> tuple[str, str]:
     return backend, choose_model_for(req.query)
 
 
+def _fingerprint(tenant_id: str) -> str:
+    """The ledger's corpus fingerprint (12.5: ledger/{tenant}; the identity 10.2's context cache follows too), or ""
+    on a lane that has never reindexed. The answer cache is keyed on it: a reindex makes every earlier answer a miss."""
+    snap = _fs().collection("ledger").document(tenant_id).get()
+    return ((snap.to_dict() or {}).get("fingerprint") or "") if snap.exists else ""
+
+
+def _semantic_hit(req, qvec, fingerprint):
+    """12.6's answer cache, when SEMANTIC_CACHE=on: the stored answer for a near-enough earlier question of this tenant
+    under this corpus, as a RAGResponse that cost nothing and cites what the original cited - or None. A cache that
+    fails is a miss and a warning, never an error: the answer is still one retrieval away."""
+    if settings.semantic_cache != "on":
+        return None
+    try:
+        hit = semantic_cache.lookup(_fs(), req.tenant_id, qvec, fingerprint,
+                                    scope=semantic_cache.scope_of(req.filters, req.top_k, settings.prompt_version),
+                                    question=req.query)   # the exact rung first: the same words never reach the vector search
+    except Exception as e:  # noqa: BLE001
+        log.warning(json.dumps({"event": "semantic_cache_failed", "tenant": req.tenant_id, "error": type(e).__name__}))
+        return None
+    if not hit:
+        return None
+    return RAGResponse(**hit["answer"], model=hit.get("model") or settings.generator_model, backend="cache",
+                       cost_usd=0.0, tokens_in=0, tokens_out=0, latency_ms=0, cache_hit="semantic")
+
+
+def _semantic_store(req, qvec, ans, fingerprint) -> None:
+    """After /v1/query has an answer the caller is getting - answerable, cited, not blocked: a refusal is not worth a
+    day and a blocked answer is not worth anything. Only the contract is stored (RAGAnswer: answer, citations,
+    confidence, answerable), never the envelope. Failing to store is a warning, never a failed request."""
+    if settings.semantic_cache != "on" or not (ans.answerable and ans.citations):
+        return
+    try:
+        semantic_cache.store(_fs(), req.tenant_id, req.query, qvec,
+                             RAGAnswer.model_validate(ans.model_dump()).model_dump(), fingerprint, model=ans.model,
+                             scope=semantic_cache.scope_of(req.filters, req.top_k, settings.prompt_version))
+    except Exception as e:  # noqa: BLE001
+        log.warning(json.dumps({"event": "semantic_cache_store_failed", "tenant": req.tenant_id, "error": type(e).__name__}))
+
+
+def check_filters(filters: dict | None) -> None:
+    """The request's filters, or a 400 (12 September 2026, R06). A key that is not a restrict namespace on the
+    index and a field on the row filters nothing on one path and everything on another; tenant_id and `current`
+    are the roster's and the ledger's, never the caller's - a body field is a header in disguise. A typo is a 400
+    that names the allowed keys, not an empty pool that reads like an honest "nothing found"."""
+    if not filters:
+        return
+    bad = sorted(set(filters) - set(FILTER_KEYS))
+    if bad:
+        raise HTTPException(400, f"unknown filter key(s) {', '.join(bad)}; allowed: {', '.join(FILTER_KEYS)}")
+    for k, v in filters.items():
+        if not isinstance(v, str) or not v:
+            raise HTTPException(400, f"filter {k} must be a non-empty string")
+
+
+EMPTY_POOL_ANSWER = ("The corpus holds nothing near this question: no passage of this tenant's current documents was "
+                     "retrieved, so there is nothing to answer from and nothing to cite. Check that the document you "
+                     "expect is ingested and current, or ask with the words it uses.")
+
+
+def empty_pool_answer(model: str, stages: dict) -> RAGResponse:
+    """The answer for an empty pool (12 September 2026, R06): retrieval found no candidate, so there is nothing for
+    the reranker to order and nothing for the model to read - a model call would buy an invented answer or a refusal
+    at full price. A refusal in the contract's own shape (answerable=False, no citations, confidence low), backend
+    "none", zero tokens, zero cost; the rerank and generate clocks read 0 because they never ran. Never stored in the
+    answer cache (_semantic_store refuses an unanswerable answer), and the row's answerable=False is what the
+    unanswerable alert counts: a question the corpus cannot reach is its business."""
+    stages["rerank_ms"] = stages["generate_ms"] = 0
+    return RAGResponse(answer=EMPTY_POOL_ANSWER, citations=[], confidence="low", answerable=False, model=model,
+                       backend="none", cost_usd=0.0, tokens_in=0, tokens_out=0, latency_ms=0, cache_hit="none")
+
+
 def usage_row(req, user, ans_tokens_in, ans_tokens_out, cached, latency_ms,
-              answerable, confidence, surface, modality="text", model=None, backend=None, cost_usd=None, guard="off"):
+              answerable, confidence, surface, modality="text", model=None, backend=None, cost_usd=None, guard="off",
+              stages=None):
     """The ONE shape every observability consumer reads.
 
     tenant_daily.sql selects exactly these fields, so a column added there
@@ -114,12 +208,21 @@ def usage_row(req, user, ans_tokens_in, ans_tokens_out, cached, latency_ms,
     priced at its own rate (cost.py), so tenant_daily's cost column is what was billed.
     """
     model = model or settings.generator_model
+    stages = stages or {}
     # The gateway prices what it served, fallbacks included (Module 11); otherwise cost.py's rate for the model.
     cost = cost_usd if cost_usd is not None else price(model, ans_tokens_in, ans_tokens_out, cached)["usd"]
     return {"event": surface, "tenant": req.tenant_id, "user": user["email"],
             "tokens_in": ans_tokens_in, "tokens_out": ans_tokens_out,
             "cached_tokens": cached, "cost_usd": round(cost, 6),
             "latency_ms": latency_ms, "answerable": answerable,
+            # Where the time went: the three stages on their own clocks (stage() above) and the size of the pool
+            # the reranker saw - the number TOP_K_RETRIEVE sets and evals/ablate.py decides. "p95 is 3 s" is a
+            # page; "generate is 2.6 s of it" is a fix. A row from before these fields is NULL in the view, not 0.
+            "retrieve_ms": stages.get("retrieve_ms", 0), "rerank_ms": stages.get("rerank_ms", 0),
+            "generate_ms": stages.get("generate_ms", 0), "pool": stages.get("pool", 0),
+            # 1 when the Ranking API did not answer and the pool stood in by retrieval score (retriever.rerank):
+            # a degraded order, counted - the rerank_fallback log event beside it carries the error type.
+            "rerank_fallback": stages.get("rerank_fallback", 0),
             "confidence": confidence,
             # An explicit 0/1 beside the boolean. Cloud Logging's
             # value_extractor pulls a NUMBER out of a log entry; it cannot
@@ -154,6 +257,7 @@ def version():
             # retrieval that "got worse" both start here.
             "embedding": f"{settings.embed_model}@{settings.embedding_version}",
             "retrieval_current_only": settings.retrieval_current_only,
+            "semantic_cache": settings.semantic_cache,   # 12.6's answer cache: off | on (smoke.py asks twice when on)
             "git_sha": os.environ.get("GIT_SHA", "unknown")}
 
 @app.get("/v1/sources")
@@ -223,23 +327,40 @@ def screen_response(text: str, guard: str) -> tuple[str, str]:
 @app.post("/v1/query", response_model=RAGResponse)
 def query(req: QueryRequest, user=Depends(verify_iap)):
     enforce_membership(user["email"], req.tenant_id)
+    check_filters(req.filters)                            # a 400 before any work: an unknown key is a typo, not an empty pool
     t0 = time.time()
     backend, model = choose_for(req)
     guard = screen_prompt(req.query, req.tenant_id)       # 12.6: before retrieval, or not at all (ARMOR=off)
-    with tracer.start_as_current_span("retrieve"):
-        chunks = retrieve(req.query, req.tenant_id, req.top_k, req.filters)
-    with tracer.start_as_current_span("rerank"):
-        chunks = rerank(req.query, chunks, req.top_k)
-    with tracer.start_as_current_span("generate"):
-        ans = generate(req.query, chunks, req.tenant_id, model=model, backend=backend)
+    stages: dict = {}
+    fingerprint = _fingerprint(req.tenant_id) if settings.semantic_cache == "on" else ""
+    with stage(stages, "retrieve"):
+        qvec = embed_query(req.query)                     # once: the answer cache and the retrieval share it
+        hit = _semantic_hit(req, qvec, fingerprint)
+        chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec)
+    stages["pool"] = len(chunks)                          # what the reranker sees: TOP_K_RETRIEVE, as served
+    if hit:
+        ans = hit                                         # served from answer_cache: no reranker, no model
+        stages["rerank_ms"] = stages["generate_ms"] = 0
+    elif not chunks:
+        ans = empty_pool_answer(model, stages)            # nothing retrieved: no reranker, no model, nothing stored
+    else:
+        with stage(stages, "rerank"):
+            chunks = rerank(req.query, chunks, req.top_k, tenant_id=req.tenant_id)
+        if rerank_fell_back(chunks):
+            stages["rerank_fallback"] = 1                 # the pool by retrieval score stood in for the Ranking API
+        with stage(stages, "generate"):
+            ans = generate(req.query, chunks, req.tenant_id, model=model, backend=backend)
     ans.latency_ms = int((time.time() - t0) * 1000)
+    ans.stages = dict(stages)                             # the same clocks in the answer, for the caller
     guard, reason = screen_response(ans.answer, guard)   # 12.6: the buffered final answer, never a token
+    if not (hit or reason):
+        _semantic_store(req, qvec, ans, fingerprint)      # only what the caller is getting: answerable, cited, not blocked
     # ans.model is the model that ANSWERED: the routed tier, the default it fell back to on a 429 (F45), or the
     # gateway route (Module 11); ans.backend says which door it went through.
     row = usage_row(req, user, ans.tokens_in, ans.tokens_out, getattr(ans, "cached_tokens", 0),
                     ans.latency_ms, ans.answerable, ans.confidence, "query",
                     modality=modality_of(c.kind for c in ans.citations), model=ans.model or model,
-                    backend=ans.backend, cost_usd=ans.cost_usd, guard=guard)
+                    backend=ans.backend, cost_usd=ans.cost_usd, guard=guard, stages=stages)
     log.info(json.dumps(row))
     _record(row["cost_usd"])
     if reason:
@@ -257,29 +378,60 @@ def _record(usd: float) -> None:
 @app.post("/v1/stream")
 def stream(req: QueryRequest, user=Depends(verify_iap)):
     enforce_membership(user["email"], req.tenant_id)
+    check_filters(req.filters)                            # a 400 before the stream starts, like the guard's
     guard = screen_prompt(req.query, req.tenant_id)       # 12.6: before the stream starts, so a block is a 400, not a broken stream
     def sse():
         t0 = time.time()
         backend, model = choose_for(req)
-        chunks = retrieve(req.query, req.tenant_id, req.top_k, req.filters)
-        chunks = rerank(req.query, chunks, req.top_k)
-        # Citations first: they come from retrieval, so they are known before a
-        # single token exists. The UI can render the sources while the answer
-        # is still being written.
-        for i, c in enumerate(chunks, 1):
-            # The same fields a Citation carries, so the UI renders a figure or a video
-            # segment from the stream exactly as it would from /v1/query (gap G7).
-            yield f"event: citation\ndata: {json.dumps({'n': i, 'chunk_id': c.get('id'), 'source': c['source_uri'], 'page': c.get('page_start'), 'quote': c['text'][:240], 'kind': c.get('kind', 'text'), 'media_url': c.get('media_url'), 'start': c.get('start'), 'end': c.get('end'), 'effective_from': c.get('effective_from')})}\n\n"
+        # The same three clocks as /v1/query, without the spans: a generator suspended between tokens is
+        # no place to hold a span's context, and the trace already carries the request's own span.
+        stages: dict = {}
+        fingerprint = _fingerprint(req.tenant_id) if settings.semantic_cache == "on" else ""
+        tick = time.perf_counter()
+        qvec = embed_query(req.query)
+        hit = _semantic_hit(req, qvec, fingerprint)      # the stream reads the answer cache; only /v1/query fills it
+        chunks = [] if hit else retrieve(req.query, req.tenant_id, req.top_k, req.filters, vec=qvec)
+        stages["retrieve_ms"], stages["pool"] = _ms(tick), len(chunks)
+        tick = time.perf_counter()
+        if chunks:                                   # a hit brought none; an empty pool has nothing to rank
+            chunks = rerank(req.query, chunks, req.top_k, tenant_id=req.tenant_id)
+            if rerank_fell_back(chunks):
+                stages["rerank_fallback"] = 1
+        stages["rerank_ms"] = _ms(tick)
+        # The empty pool (12 September 2026): nothing retrieved is nothing to read and nothing to cite - one
+        # token that says so, then done, with no model call; the row's answerable=False feeds the alert.
+        empty = None if (hit or chunks) else empty_pool_answer(model, stages)
+        kinds = [c.kind for c in hit.citations] if hit else []      # what the answer was made from, for the row
+        for i, c in enumerate(hit.citations if hit else [], 1):
+            # A hit's citations are the contract's, resolved when the answer was first given: the same event shape.
+            yield f"event: citation\ndata: {json.dumps({'n': i, 'chunk_id': c.chunk_id, 'source': c.source_uri, 'page': c.page, 'quote': c.quote[:240], 'kind': c.kind, 'media_url': c.media_url, 'start': c.start, 'end': c.end})}\n\n"
         usage = {"tokens_in": 0, "tokens_out": 0}
         held = []                                    # 12.6: with the guard on, the answer is screened whole, then sent
-        for kind, payload in generate_stream(req.query, chunks, req.tenant_id, model=model, backend=backend):
-            if kind == "token":
+        tick = time.perf_counter()
+        if hit:                                      # the stored answer as one token: the UI cannot tell, the row can
+            usage = {"tokens_in": 0, "tokens_out": 0, "cached_tokens": 0, "cost_usd": 0.0, "model": hit.model, "backend": "cache"}
+        elif empty:                                  # the refusal as one token: no model, no cost, backend "none"
+            usage = {"tokens_in": 0, "tokens_out": 0, "cached_tokens": 0, "cost_usd": 0.0, "model": empty.model, "backend": "none"}
+        for kind, payload in ([("token", hit.answer)] if hit else [("token", empty.answer)] if empty else
+                              generate_stream(req.query, chunks, req.tenant_id, model=model, backend=backend)):
+            if kind == "packed":
+                # Citations first, and from the PACKED set (12 September 2026, R06): they are known before a
+                # single token exists, so the UI renders the sources while the answer is written - but the
+                # budget may drop a chunk between the reranker and the prompt, and a passage the model never
+                # read is not a source. generate_stream yields this list before its first token.
+                kinds = [c.get("kind", "text") for c in payload]
+                for i, c in enumerate(payload, 1):
+                    # The same fields a Citation carries, so the UI renders a figure or a video
+                    # segment from the stream exactly as it would from /v1/query (gap G7).
+                    yield f"event: citation\ndata: {json.dumps({'n': i, 'chunk_id': c.get('id'), 'source': c['source_uri'], 'page': c.get('page_start'), 'quote': c['text'][:240], 'kind': c.get('kind', 'text'), 'media_url': c.get('media_url'), 'start': c.get('start'), 'end': c.get('end'), 'effective_from': c.get('effective_from')})}\n\n"
+            elif kind == "token":
                 if settings.armor == "on":
                     held.append(payload)
                 else:
                     yield f"event: token\ndata: {json.dumps({'t': payload})}\n\n"
             else:
                 usage = payload
+        stages["generate_ms"] = 0 if empty else _ms(tick)   # first token to last: the model's whole turn, as the client felt it
         verdict, reason = screen_response("".join(held), guard) if held else (guard, "")
         if reason:
             yield f"event: error\ndata: {json.dumps({'error': reason})}\n\n"
@@ -288,14 +440,18 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
                 yield f"event: token\ndata: {json.dumps({'t': t})}\n\n"
         model = usage.get("model") or model          # the model that answered (F45: a tier can fall back)
         backend = usage.get("backend") or backend    # and the door it went through (Module 11)
-        done = {**usage, "latency_ms": int((time.time() - t0) * 1000),
+        done = {**usage, "latency_ms": int((time.time() - t0) * 1000), "stages": stages,
+                "cache_hit": "semantic" if hit else "none",
                 "model": model, "backend": backend,
                 "prompt": f"{settings.prompt_id}@{settings.prompt_version}"}
+        # The row's verdict: a refusal for the empty pool; otherwise the stream still says answerable (6.3 of the
+        # plan gives the stream a real verdict) - the empty pool no longer hides in that.
+        answerable, confidence = (False, "low") if empty else (True, hit.confidence if hit else "medium")
         row = usage_row(req, user, usage.get("tokens_in", 0), usage.get("tokens_out", 0),
                         usage.get("cached_tokens", 0), done["latency_ms"],
-                        True, "medium", "stream",
-                        modality=modality_of(c.get("kind", "text") for c in chunks), model=model,
-                        backend=backend, cost_usd=usage.get("cost_usd"), guard=verdict)
+                        answerable, confidence, "stream",
+                        modality=modality_of(kinds), model=model,
+                        backend=backend, cost_usd=usage.get("cost_usd"), guard=verdict, stages=stages)
         log.info(json.dumps(row))
         _record(row["cost_usd"])
         yield f"event: done\ndata: {json.dumps(done)}\n\n"

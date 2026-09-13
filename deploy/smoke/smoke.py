@@ -17,6 +17,9 @@ Checks:
     1. GET  /health                -> 200 {"status":"ok"}
     2. GET  /ready                 -> 200 (tolerates 404 if not implemented)
     3. POST /v1/query              -> 200 with answer + citations + answerable
+    3b. the same question with no token -> 401/403 (the door refuses before the roster is asked)
+    3c. (SEMANTIC_CACHE=on only) the same question again -> a hit: cache_hit=semantic, backend=cache,
+        the same citations. Off, the line says so and asserts nothing.
     4. (optional) BigQuery query-log row for today (informational)
     5. (optional) documind-chat remembers across two requests - 8.5's gate, the checkpointer.
        Needs DOCUMIND_CHAT_URL and DOCUMIND_CHAT_TOKEN (an ID token IAP accepts for the chat
@@ -138,6 +141,7 @@ def main() -> int:
     q = {"query": os.environ.get("DOCUMIND_SMOKE_QUESTION",
                                  "After how many years of continuous service does gratuity become payable?"),
          "tenant_id": TENANT, "user_id": "u_smoke", "top_k": 5, "stream": False}
+    j = {}
     st, body = call("POST", "/v1/query", token, body=q)
     if st == 200:
         try:
@@ -163,6 +167,29 @@ def main() -> int:
         ok("no token refused", f"status={st}")
     else:
         bad("no token refused", f"status={st} - the service answered an anonymous caller")
+
+    # 3c. the answer cache (12.6, SEMANTIC_CACHE=on): the same question again is a hit - answered from Firestore with
+    # the citations it had, backend=cache, cost 0 - and identical citations prove it is the SAME answer, not a near
+    # one. Off (the lane's default), the line says so and asserts nothing: a cache that is off is not a failure.
+    st, vbody = call("GET", "/version", token)
+    try:
+        cache_on = st == 200 and json.loads(vbody).get("semantic_cache") == "on"
+    except json.JSONDecodeError:
+        cache_on = False
+    if cache_on:
+        st, body = call("POST", "/v1/query", token, body=q)
+        try:
+            j2 = json.loads(body) if st == 200 else {}
+        except json.JSONDecodeError:
+            j2 = {}
+        same = [c.get("chunk_id") for c in j2.get("citations", [])] == [c.get("chunk_id") for c in j.get("citations", [])]
+        if j2.get("cache_hit") == "semantic" and j2.get("backend") == "cache" and same and j2.get("citations"):
+            ok("semantic cache", f"hit in {j2.get('latency_ms')} ms, backend=cache, the same {len(j2['citations'])} citations")
+        else:
+            bad("semantic cache", f"second ask was not a hit: status={st} cache_hit={j2.get('cache_hit')} "
+                                  f"backend={j2.get('backend')} same_citations={same}")
+    else:
+        print("  [ -- ] semantic cache  SEMANTIC_CACHE is off on this service (/version) — skipped")
 
     # 4. observability row (optional, informational)
     if PROJECT:

@@ -17,6 +17,19 @@ SELECT
   APPROX_QUANTILES(CAST(jsonPayload.latency_ms AS INT64), 100)[OFFSET(50)] AS p50_ms,
   APPROX_QUANTILES(CAST(jsonPayload.latency_ms AS INT64), 100)[OFFSET(95)] AS p95_ms,
   APPROX_QUANTILES(CAST(jsonPayload.latency_ms AS INT64), 100)[OFFSET(99)] AS p99_ms,
+  -- Where the time went. p95_ms moved: which stage moved it? The API row clocks each stage on its
+  -- own (main.py stage()), so the answer is a column, not a trace hunt. pool is the candidates the
+  -- reranker saw - the number TOP_K_RETRIEVE sets and evals/ablate.py decides - read here after it
+  -- moves. BigQuery types a sink table's jsonPayload from the rows it has seen: run `make bq-views`
+  -- after an API that logs these four has answered once, or the CREATE fails on "Field name
+  -- retrieve_ms does not exist" - a missing field is a refusal, never a column of NULLs.
+  APPROX_QUANTILES(CAST(jsonPayload.retrieve_ms AS INT64), 100)[OFFSET(95)] AS p95_retrieve_ms,
+  APPROX_QUANTILES(CAST(jsonPayload.rerank_ms   AS INT64), 100)[OFFSET(95)] AS p95_rerank_ms,
+  APPROX_QUANTILES(CAST(jsonPayload.generate_ms AS INT64), 100)[OFFSET(95)] AS p95_generate_ms,
+  ROUND(AVG(CAST(jsonPayload.pool AS FLOAT64)), 1) AS avg_pool,
+  -- The Ranking API stood in for by the retrieval order (retriever.rerank's fallback, 12 September 2026): a
+  -- day with a number here served degraded answers, and that number is what pages someone.
+  SUM(CAST(jsonPayload.rerank_fallback AS INT64)) AS rerank_fallbacks,
   SUM(CAST(jsonPayload.cached_tokens AS INT64)) AS cached_tokens,
   ROUND(SUM(CAST(jsonPayload.cost_usd AS FLOAT64)), 4) AS cost_usd,
   ROUND(SUM(CAST(jsonPayload.cost_usd AS FLOAT64)) * 85, 2) AS cost_inr

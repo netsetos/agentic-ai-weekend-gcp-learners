@@ -40,12 +40,26 @@ def rrf_fuse(dense_ids: list[str], sparse_ids: list[str], alpha: float = 0.5, k:
 
 
 def hybrid_find_neighbors(index_endpoint, deployed_index_id: str, dense_vec: list[float], query_text: str,
-                          tenant_id: str, k: int = 20, alpha: float = 0.5):
-    """Vector Search hybrid query with the tenant restrict in the query (never post-filter)."""
+                          tenant_id: str, k: int = 20, alpha: float = 0.5, restricts: list | None = None) -> list:
+    """Vector Search hybrid query with the tenant restrict in the query (never post-filter).
+
+    Returns the ONE query's neighbours - a flat list of MatchNeighbor - and [] when there are none.
+    find_neighbors answers List[List[...]], one inner list per query sent, and this sends one query;
+    until 12 September 2026 the outer list came back as it was, so retriever.py iterated a single
+    element that was itself a list and stopped on `.id` (R06). An empty answer is an empty pool,
+    not an error: main.py answers it without a model call.
+
+    `restricts` (12 September 2026): the Namespace list the dense path sends - the tenant, the
+    ledger's `current`, the caller's filters - so a doc_type filter means the same thing on both
+    paths (R06, "filters dropped"). The tenant restrict is put in whatever the caller passed: a
+    hybrid query without it would read every tenant's rows.
+    """
     from google.cloud.aiplatform.matching_engine.matching_engine_index_endpoint import HybridQuery, Namespace
     vals, dims = sparse_encode(query_text)
     q = HybridQuery(dense_embedding=dense_vec, sparse_embedding_values=vals,
                     sparse_embedding_dimensions=dims, rrf_ranking_alpha=alpha)
-    return index_endpoint.find_neighbors(
-        deployed_index_id=deployed_index_id, queries=[q], num_neighbors=k,
-        filter=[Namespace(name="tenant_id", allow_tokens=[tenant_id])])
+    filters = [Namespace(name="tenant_id", allow_tokens=[tenant_id])]
+    filters += [r for r in (restricts or []) if getattr(r, "name", None) != "tenant_id"]
+    resp = index_endpoint.find_neighbors(
+        deployed_index_id=deployed_index_id, queries=[q], num_neighbors=k, filter=filters)
+    return resp[0] if resp else []

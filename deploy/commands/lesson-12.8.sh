@@ -31,6 +31,17 @@ gcloud run deploy documind-chat \
   ${CHAT_SQL_FLAGS---add-cloudsql-instances=$PROJECT:us-central1:documind-checkpoint --set-secrets=CHECKPOINT_DSN=documind-checkpoint-dsn:latest} \
   --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|DOCUMIND_PROFILE=gcp|RAG_API_URL=https://documind-api-$PROJECT_NUMBER.us-central1.run.app|SELF_URL=https://documind-chat-$PROJECT_NUMBER.us-central1.run.app|RAG_TIMEOUT_S=90|DOCUMIND_BRAIN=langchain|GOOGLE_GENAI_USE_VERTEXAI=1|GOOGLE_CLOUD_LOCATION=global|IAP_AUDIENCE=/projects/$PROJECT_NUMBER/locations/us-central1/services/documind-chat,/projects/$PROJECT_NUMBER/locations/us-central1/services/documind-ui${CHAT_EXTRA_ENV-}"
 
+# 2b. Who may call it (12 September 2026): the UI's account - the brain radio on the chat page posts here as
+#     ui-sa with the person's assertion (12.4) - and the eval gate's outsider, which make smoke-chat sends to
+#     /v1/chat to see the ROSTER's 403 and not the network's. Bound here, on the service, because the
+#     project-wide roles/run.invoker both accounts used to carry (sa.tf) admitted them to every service, the
+#     A2A peer included. sa.tf's caller graph is the list; the gate check_authz.py compares this loop with it.
+for who in documind-ui-sa documind-outsider-sa; do
+  gcloud run services add-iam-policy-binding documind-chat \
+    --region=us-central1 --project=$PROJECT \
+    --member="serviceAccount:$who@$PROJECT.iam.gserviceaccount.com" --role=roles/run.invoker --quiet
+done
+
 # 3. The one-time checkpoint migration (8.5: setup() takes exclusive locks - a job, never startup).
 #    Full profile only: the lean lane has no database to migrate.
 if [ "${PROFILE-full}" = full ]; then

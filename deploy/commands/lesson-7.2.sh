@@ -21,9 +21,11 @@ gcloud run deploy documind-mcp \
   --set-env-vars="^|^GOOGLE_CLOUD_PROJECT=$PROJECT|DOCUMIND_PROFILE=gcp|RAG_API_URL=https://documind-api-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|SELF_URL=https://documind-mcp-$PROJECT_NUMBER.${REGION:-us-central1}.run.app|FASTMCP_STATELESS_HTTP=true|RAG_TIMEOUT_S=90"
 
 # Who may KNOCK: IAM invoker on this service. The operators' accounts (7.3's notebook mints as the
-# UI's), and the eval gate's outsider - deliberately, so the third call in 7.2 is refused by the
-# ROSTER and not by the network. An agent service you add later gets the same line for its account.
-for who in documind-ui-sa documind-outsider-sa; do
+# UI's), the A2A peer (8.4: documind-agent-sa knows this URL and no other; it carried a project-wide
+# invoker until 12 September 2026, and sa.tf's caller graph now names this line instead), and the
+# eval gate's outsider - deliberately, so the third call in 7.2 is refused by the ROSTER and not by
+# the network. An agent service you add later gets the same line for its account.
+for who in documind-ui-sa documind-agent-sa documind-outsider-sa; do
   gcloud run services add-iam-policy-binding documind-mcp \
     --region=${REGION:-us-central1} --project=$PROJECT \
     --member="serviceAccount:$who@$PROJECT.iam.gserviceaccount.com" --role=roles/run.invoker --quiet

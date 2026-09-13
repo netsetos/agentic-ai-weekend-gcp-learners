@@ -1,0 +1,42 @@
+{"id": "pp-01", "of": "lk-01", "question": "How much can I claim per trip for domestic travel?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-02", "of": "lk-01", "question": "Domestic travel reimbursement: what is the cap for one trip?", "same": true, "why": "reordered", "tenant": "acme"}
+{"id": "pp-03", "of": "lk-02", "question": "When does the company issue Form 16?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-04", "of": "lk-03", "question": "What is the maximum earned leave I can carry over to next year?", "same": true, "why": "synonym: carry over", "tenant": "acme"}
+{"id": "pp-05", "of": "lk-04", "question": "During probation, how much notice do I have to give?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-06", "of": "lk-06", "question": "How long is the notice period once an E3 is confirmed?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-07", "of": "lk-06", "question": "Notice period for confirmed E3 employees?", "same": true, "why": "shortened", "tenant": "acme"}
+{"id": "pp-08", "of": "lk-07", "question": "How fast does earned leave accrue each month?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-09", "of": "lk-08", "question": "Whose approval is needed for a Rs 3 lakh purchase?", "same": true, "why": "3,00,000 as 3 lakh", "tenant": "acme"}
+{"id": "pp-10", "of": "lk-09", "question": "How many remote-work days am I allowed per month?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-11", "of": "lk-12", "question": "How much notice does the MSA need for termination for convenience?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-12", "of": "lk-14", "question": "After the 2017 amendment, what is the longest maternity benefit period?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-13", "of": "lk-15", "question": "At what headcount does a creche become mandatory?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-14", "of": "lk-16", "question": "How many years of continuous service before gratuity is payable?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-15", "of": "lk-17", "question": "Gratuity is paid at what rate per completed year?", "same": true, "why": "reordered", "tenant": "acme"}
+{"id": "pp-16", "of": "lk-18", "question": "What is the minimum bonus payable under the Bonus Act?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-17", "of": "lk-20", "question": "Under the Code on Wages, what is the rate for overtime?", "same": true, "why": "reordered", "tenant": "acme"}
+{"id": "pp-18", "of": "lk-21", "question": "Under the Code on Wages, what is the deadline for paying monthly wages?", "same": true, "why": "reworded", "tenant": "zeta"}
+{"id": "pp-19", "of": "lk-23", "question": "The standing orders chapter of the IR Code applies from how many workers?", "same": true, "why": "reordered", "tenant": "acme"}
+{"id": "pp-20", "of": "lk-25", "question": "Under the OSH Code, how many days of work earn a day of leave?", "same": true, "why": "reordered", "tenant": "acme"}
+{"id": "pp-21", "of": "lk-26", "question": "Under the DPDP Act, what is a Consent Manager?", "same": true, "why": "reordered", "tenant": "acme"}
+{"id": "pp-22", "of": "lk-28", "question": "Under the DPDP Act, who counts as a Data Fiduciary?", "same": true, "why": "reworded", "tenant": "globex"}
+{"id": "pp-23", "of": "lk-30", "question": "What are the conditions on a Data Principal's consent under the DPDP Act?", "same": true, "why": "reworded", "tenant": "acme"}
+{"id": "pp-24", "of": "jn-01", "question": "What notice applies if I resign while on probation, and is leave encashable then?", "same": true, "why": "reordered join", "tenant": "acme"}
+{"id": "pp-25", "of": "lk-06", "question": "What is the notice period for a confirmed E2?", "same": false, "why": "grade changed: E3 -> E2", "tenant": "acme"}
+{"id": "pp-26", "of": "lk-06", "question": "What is the notice period during probation?", "same": false, "why": "lk-04's question: probation, not confirmed", "tenant": "acme"}
+{"id": "pp-27", "of": "lk-04", "question": "What notice period applies after probation?", "same": false, "why": "negation of the period", "tenant": "acme"}
+{"id": "pp-28", "of": "lk-03", "question": "How many days of sick leave can I carry forward?", "same": false, "why": "leave type changed", "tenant": "acme"}
+{"id": "pp-29", "of": "lk-02", "question": "By when is Form 12BA issued?", "same": false, "why": "form changed", "tenant": "acme"}
+{"id": "pp-30", "of": "lk-07", "question": "At what rate does sick leave accrue?", "same": false, "why": "leave type changed", "tenant": "acme"}
+{"id": "pp-31", "of": "lk-08", "question": "Who approves a purchase of Rs 30,000?", "same": false, "why": "amount changed by a digit", "tenant": "acme"}
+{"id": "pp-32", "of": "lk-09", "question": "How many days a month must I work from the office?", "same": false, "why": "the complement", "tenant": "acme"}
+{"id": "pp-33", "of": "lk-12", "question": "What notice does the ACME MSA require to terminate for cause?", "same": false, "why": "cause, not convenience", "tenant": "acme"}
+{"id": "pp-34", "of": "lk-13", "question": "What is the availability target in the ACME MSA?", "same": false, "why": "tenant's document changed: Zeta -> ACME", "tenant": "zeta"}
+{"id": "pp-35", "of": "lk-14", "question": "What was the maximum period of maternity benefit before the 2017 amendment?", "same": false, "why": "before, not after", "tenant": "acme"}
+{"id": "pp-36", "of": "lk-16", "question": "After how many years of continuous service does pension become payable?", "same": false, "why": "gratuity -> pension", "tenant": "acme"}
+{"id": "pp-37", "of": "lk-18", "question": "What is the maximum bonus under the Payment of Bonus Act?", "same": false, "why": "minimum -> maximum", "tenant": "acme"}
+{"id": "pp-38", "of": "lk-20", "question": "What is the minimum wage under the Code on Wages?", "same": false, "why": "overtime -> minimum wage", "tenant": "acme"}
+{"id": "pp-39", "of": "lk-21", "question": "By when must annual bonus be paid under the Code on Wages?", "same": false, "why": "wages -> bonus", "tenant": "zeta"}
+{"id": "pp-40", "of": "lk-25", "question": "How many days of work earn one day of sick leave under the OSH Code?", "same": false, "why": "leave type changed", "tenant": "acme"}
+{"id": "pp-41", "of": "lk-26", "question": "What is a Data Fiduciary under the DPDP Act?", "same": false, "why": "lk-28's question: another term", "tenant": "acme"}
+{"id": "pp-42", "of": "jn-01", "question": "If I resign after confirmation, what notice applies and can I encash leave?", "same": false, "why": "probation -> confirmed", "tenant": "acme"}

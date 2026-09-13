@@ -61,7 +61,7 @@ jobs:
 
   # ---------------------------------------------------------------- the lane's release (lean)
   # Module 10's seam as a pipeline, keyless. The same image tagged with the SHA; a candidate revision of documind-api
-  # that takes no traffic (make release-candidate); the live gate on it - 64 rows, five thresholds, as the roster
+  # that takes no traffic (make release-candidate); the live gate on it - 65 rows, nine thresholds, as the roster
   # member and as the outsider, whose tokens the deploy identity may mint (wif.tf); then a PERSON, through the
   # production environment's required reviewers; then the traffic flip, which is also the rollback (make rollback).
   # No Cloud Deploy verb on this path: the previous revision never went away, and GET /version says which is live.
@@ -72,6 +72,12 @@ jobs:
     env:
       PROJECT: ${{ vars.GCP_PROJECT }}
       REGION: ${{ vars.GCP_REGION }}
+    # The candidate's NAME travels to promote-lean as a job output (12 September 2026): the two jobs run on
+    # different runners, deploy/.candidate-revision is one runner's file, and promote must move traffic to the
+    # revision this job made and the gate judged - never to whatever is newest on the service by the time a
+    # person approves.
+    outputs:
+      candidate: ${{ steps.candidate.outputs.revision }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -91,8 +97,25 @@ jobs:
         working-directory: deploy
         run: make build PROJECT="$PROJECT" REGION="$REGION" SERVICES_lean=api GIT_SHA="$TAG"
       - name: A candidate revision, no traffic
+        id: candidate
         working-directory: deploy
-        run: make release-candidate PROJECT="$PROJECT" REGION="$REGION" GIT_SHA="$TAG"
+        run: |
+          make release-candidate PROJECT="$PROJECT" REGION="$REGION" GIT_SHA="$TAG"
+          echo "revision=$(cat .candidate-revision)" >> "$GITHUB_OUTPUT"
+      # Before the gate spends ten minutes: the candidate answers as the tag being released. GET /version on the
+      # tag URL names the sha the revision carries; a candidate naming another sha is another revision - the gate
+      # would judge it and a person would promote it. The token's audience is the service's canonical URL
+      # whichever URL is called (F42: a token minted for the tag URL is a 401).
+      - name: The candidate answers as the tag
+        run: |
+          NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
+          AUD="https://documind-api-$NUMBER.$REGION.run.app"
+          TOKEN=$(gcloud auth print-identity-token --include-email \
+            --impersonate-service-account="documind-ui-sa@$PROJECT.iam.gserviceaccount.com" --audiences="$AUD")
+          SHA=$(curl -sfS -H "Authorization: Bearer $TOKEN" "https://candidate---documind-api-$NUMBER.$REGION.run.app/version" \
+            | python -c 'import json, sys; print(json.load(sys.stdin).get("git_sha", ""))')
+          echo "candidate /version git_sha=$SHA, releasing TAG=$TAG"
+          [ "$SHA" = "$TAG" ] || { echo "the candidate does not answer as $TAG: the gate would judge some other revision" >&2; exit 1; }
       - name: The live gate, on the candidate
         working-directory: deploy
         run: |
@@ -106,6 +129,8 @@ jobs:
     env:
       PROJECT: ${{ vars.GCP_PROJECT }}
       REGION: ${{ vars.GCP_REGION }}
+      # Through the environment, never the script text (the rule Resolve tag follows below).
+      CANDIDATE: ${{ needs.release-lean.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
       - id: auth
@@ -114,9 +139,14 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v3
-      - name: Traffic to the candidate (the release; the previous revision never went away)
+      # The revision release-lean made, by name, into the file make promote reads; a value that is not a
+      # documind-api revision stops here. make promote itself refuses if the candidate tag has moved on since.
+      - name: Traffic to the candidate, by name (the release; the previous revision never went away)
         working-directory: deploy
-        run: make promote PROJECT="$PROJECT" REGION="$REGION"
+        run: |
+          case "$CANDIDATE" in documind-api-*) ;; *) echo "no candidate revision came out of release-lean: '$CANDIDATE'" >&2; exit 1 ;; esac
+          printf '%s\n' "$CANDIDATE" > .candidate-revision
+          make promote PROJECT="$PROJECT" REGION="$REGION"
 
   release:
     if: ${{ inputs.profile == 'full' }}

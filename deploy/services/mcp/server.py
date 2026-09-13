@@ -179,11 +179,16 @@ def list_documents(status: str = "indexed", tenant: str | None = None) -> dict:
     if documind_tools.PROFILE == "local":
         docs = _local_documents(tenant_id)
     else:
+        # The row's tenant_id FIELD, never a prefix over the collection (12 September 2026). The key
+        # is documents/{tenant}_{sha256} (12.5), and "acme_" also prefixes "acme_eu_...": a naming
+        # convention is not a boundary, and corpus_stats below already filters chunks by the field.
+        # The ingest worker stamps tenant_id at claim time (12.5, idempotency.py); rows claimed
+        # before 12 September 2026 lack the field until `make reindex` re-claims them, and are not
+        # listed until then.
+        from google.cloud.firestore_v1.base_query import FieldFilter
         docs = []
-        prefix = f"{tenant_id}_"                                   # documents/{tenant}_{sha256} (12.5)
-        for snap in _db().collection("documents").stream():
-            if not snap.id.startswith(prefix):
-                continue
+        rows = _db().collection("documents").where(filter=FieldFilter("tenant_id", "==", tenant_id)).stream()
+        for snap in rows:
             d = snap.to_dict() or {}
             if status != "all" and d.get("status") != status:
                 continue

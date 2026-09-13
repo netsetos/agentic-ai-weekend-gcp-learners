@@ -1,5 +1,24 @@
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+RETRIEVAL_BACKENDS = ("vector", "firestore")
+RETRIEVAL_MODES = ("dense", "hybrid")
+
+
+def check_retrieval_modes(backend: str, mode: str) -> None:
+    """RETRIEVAL_MODE against RETRIEVAL_BACKEND, at startup (12 September 2026, R06). Hybrid is Vector Search's
+    HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so on the lean
+    profile RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
+    what its environment says must not start: the message names the fix, so it is read on the failed deploy and not
+    found in the rows a week later. An unknown value is refused for the same reason - a typo ran dense too."""
+    if backend not in RETRIEVAL_BACKENDS or mode not in RETRIEVAL_MODES:
+        raise ValueError(f"RETRIEVAL_BACKEND={backend!r} RETRIEVAL_MODE={mode!r}: the backend is one of "
+                         f"{'|'.join(RETRIEVAL_BACKENDS)} and the mode one of {'|'.join(RETRIEVAL_MODES)}")
+    if backend == "firestore" and mode == "hybrid":
+        raise ValueError("RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: the Firestore backend (the lean profile) "
+                         "is dense-only. Set RETRIEVAL_MODE=dense, or deploy the full profile with a Vector Search "
+                         "endpoint and keep hybrid.")
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -48,7 +67,14 @@ class Settings(BaseSettings):
     budget_usd: float = Field(100.0, alias="BUDGET_USD")
     spend_pct_override: str = Field("", alias="SPEND_PCT")
     rerank_model: str = "semantic-ranker-fast-004"
-    top_k_retrieve: int = 20
+    # The Ranking API's deadline (12 September 2026): past it, or on any error, rerank() returns the pool by retrieval
+    # score and the row says rerank_fallback=1. Generous beside a 20-record call, which answers well inside a second;
+    # a ranker that takes longer is not ranking, it is down, and a worse order beats a hung request and then a 500.
+    rerank_timeout_s: float = Field(5.0, alias="RERANK_TIMEOUT_S")
+    # The pool the reranker sees - the funnel's width. 20 shipped; evals/ablate.py's "dense 50 -> rerank 5" arm is
+    # the measurement that moves it, and the row's rerank_ms / pool columns are what the move costs. An env var, so
+    # the move is a number in the service's environment, not a code change. top_k (the request, <= 20) is what comes OUT.
+    top_k_retrieve: int = Field(20, alias="TOP_K_RETRIEVE")
     top_k_rerank: int = 5
     max_context_tokens: int = 8000
     # 2048, not 1024: a statute answer with its quotes - and the thinking drawn from the same
@@ -71,6 +97,10 @@ class Settings(BaseSettings):
     armor: str = Field("off", alias="ARMOR")                              # off | on
     armor_location: str = Field("asia-south1", alias="ARMOR_LOCATION")
     armor_template: str = Field("documind-guard", alias="ARMOR_TEMPLATE")
+    # 12.6's answer cache (semantic_cache.py), wired 12 September 2026: off | on. On, a near-enough earlier question
+    # of the same tenant under the same corpus fingerprint is answered from Firestore - no retrieval, no model call.
+    # Off on the lane until the threshold is measured on paraphrase pairs (the RAG plan, W4).
+    semantic_cache: str = Field("off", alias="SEMANTIC_CACHE")
     prompt_id: str = "documind-rag"
     prompt_version: str = "v3"
     retrieval_mode: str = "dense"          # dense | hybrid (4.5's hybrid.py)
@@ -79,5 +109,13 @@ class Settings(BaseSettings):
     # BigQuery model_prices table so a rate change is not a redeploy.
     price_in: float = 1.50
     price_out: float = 7.50
+
+    @model_validator(mode="after")
+    def _retrieval_modes_agree(self):
+        # Refused here, at import, so a revision with an impossible pair never serves: the deploy fails with the
+        # message above instead of a service that runs dense and reports hybrid. /version reports the mode that
+        # passed this check - the effective one.
+        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode)
+        return self
 
 settings = Settings()

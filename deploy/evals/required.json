@@ -1,0 +1,20 @@
+{
+ "note": "The rows that must exist in golden.jsonl and must individually pass the live gate: every version row (the ledger's promise), every isolation row (a leak is the whole product) and every row that asks for a media citation. run_eval.py's offline half fails when one is missing here or there; the live half blocks when one does not pass, whatever the rates say. Removing an id is a reviewed diff of this file, never a quiet shrink.",
+ "ids": [
+  "iso-01",
+  "iso-02",
+  "iso-03",
+  "iso-04",
+  "iso-05",
+  "iso-06",
+  "iso-07",
+  "iso-08",
+  "iso-09",
+  "iso-10",
+  "mm-01",
+  "mm-02",
+  "mm-03",
+  "mm-04",
+  "vr-01"
+ ]
+}

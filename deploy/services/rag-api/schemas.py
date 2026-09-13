@@ -5,6 +5,12 @@ from pydantic import BaseModel, Field
 # Gap G1: until 2026-09-05 this file carried its own Citation/RAGAnswer, the third of three.
 from shared.documind_schemas import Citation, DraftCitation, ModelDraft, RAGAnswer, resolve  # noqa: F401
 
+# The filter keys a caller may send (12 September 2026): each one is a restrict namespace the indexer writes on
+# the datapoint AND a field on the Firestore row, so the same predicate holds on the dense path, the hybrid path
+# and the Firestore fallback alike. tenant_id is the roster's and `current` is the ledger's - never the body's: a
+# caller naming either is a header in disguise. main.py refuses any other key with a 400 (check_filters).
+FILTER_KEYS = ("doc_type", "kind")
+
 class QueryRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
     tenant_id: str = Field(min_length=1)
@@ -15,7 +21,7 @@ class QueryRequest(BaseModel):
     user_id: Optional[str] = None
     top_k: int = Field(default=5, ge=1, le=20)
     stream: bool = True
-    filters: Optional[dict] = None  # e.g. {"doc_type": "policy"}
+    filters: Optional[dict] = None  # e.g. {"doc_type": "policy"}: keys from FILTER_KEYS, string values
     # Which harness is asking (8.7, gap G6): the chat service's brains and the UI label
     # themselves so usage_row - and therefore tenant_daily - can compare them. A label only;
     # nothing in retrieval or generation reads it. "mcp" is the agent surface (7.1-7.2): its
@@ -33,7 +39,16 @@ class RAGResponse(RAGAnswer):
     cost_usd: Optional[float] = None
     tokens_in: int
     tokens_out: int
+    # 10.2's context cache, on the answer (12 September 2026): the prompt tokens the model served from it, INSIDE
+    # tokens_in and priced at the cache rate (cost.py). Every paid attempt is summed here - the truncation retry's
+    # first attempt included - so the row's cost_usd is what was billed.
+    cached_tokens: int = 0
     latency_ms: int
+    # Where the time went (main.py stage()): retrieve_ms, rerank_ms, generate_ms and the pool the reranker saw.
+    # The usage row carries the same four flat, for tenant_daily; here they ride together, for the caller.
+    stages: dict[str, int] = Field(default_factory=dict)
+    # 12.6's answer cache: "semantic" when this answer was served from it (backend=cache, cost 0), else "none".
+    cache_hit: Literal["none", "semantic"] = "none"
 
 class StreamEvent(BaseModel):
     # Server-Sent Events payload

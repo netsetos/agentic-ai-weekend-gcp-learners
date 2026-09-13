@@ -12,7 +12,7 @@ from google import genai
 from google.genai import errors, types
 from schemas import DraftCitation, ModelDraft, RAGResponse, resolve
 from config import settings
-from context_budget import pack_chunks, estimate_tokens
+from context_budget import pack_chunks, estimate_tokens, TokenBudget
 from cache_manager import TenantCacheManager
 from functools import lru_cache
 
@@ -182,6 +182,52 @@ def _dated_rule(packed: list[dict]) -> str:
     return DATED_RULE if any(c.get("effective_from") for c in packed) else ""
 
 
+def _budget(query: str, count_fn=estimate_tokens) -> TokenBudget:
+    """The request's budget lines (4.5's TokenBudget, imported by nothing until 12 September 2026): the fixed parts
+    of the prompt are counted - SYSTEM, the dated rule and the question with its scaffolding - and the chunks get
+    what is LEFT of max_context_tokens. Until then the whole of max_context_tokens went to the chunks and the fixed
+    parts rode on top, so the prompt exceeded the configured total by their size on every full request (R06). The
+    dated rule is reserved whether or not a packed chunk turns out to carry a date: that is known only after
+    packing, and holding its room is the safe side. count_fn is estimate_tokens (len // 4), the counter pack_chunks
+    uses per block; a real count - client.models.count_tokens - can be injected here and there alike."""
+    fixed = f"{SYSTEM}{DATED_RULE}\n\nContext:\n\n\nQuestion: {query}"      # the prompt below, with nothing packed
+    return TokenBudget.fit(settings.max_context_tokens, fixed, count_fn, answer=settings.max_answer_tokens)
+
+
+def _pack(query: str, chunks: list[dict]) -> tuple[str, list[dict]]:
+    """The context and the packed set for the prompt: pack_chunks inside the chunk budget, the drops logged.
+    THREE values from pack_chunks, not one: (context, packed, dropped) - 4.5's contract, and its own docstring
+    says so. Assigning the tuple to `chunks` and handing it to build_context() raised AttributeError: 'str'
+    object has no attribute 'get' on EVERY request, while /health and /ready both stayed green."""
+    context, packed, dropped = pack_chunks(chunks, _budget(query).chunks, estimate_tokens)
+    if dropped:
+        # Not silent. A dropped chunk is a passage the model was never shown, and
+        # "the answer got worse after we added documents" starts here.
+        log.info(json.dumps({"event": "context_budget_drop",
+                             "packed": len(packed), "dropped": len(dropped)}))
+    return context, packed
+
+
+def _usage(r) -> dict:
+    """What one attempt billed (6.2, 12 September 2026): the prompt tokens - the cached ones among them, priced at
+    the cache rate by cost.py - and the output, which on the 3.x family is the candidates AND the thinking:
+    thoughts_token_count is billed as output whether or not a thought is shown, and until now it was never added,
+    so every row under-counted what the month's counter (budget.py) then read."""
+    u = getattr(r, "usage_metadata", None)
+    n = lambda k: getattr(u, k, None) or 0  # noqa: E731 - None from the SDK means "not this call", not 0 tokens
+    return {"tokens_in": n("prompt_token_count"),
+            "tokens_out": n("candidates_token_count") + n("thoughts_token_count"),
+            "cached_tokens": n("cached_content_token_count")}
+
+
+def _add(a: dict, b: dict) -> dict:
+    """Two attempts' usage as one bill: the tokens summed, the gateway's price summed when either attempt carried one."""
+    out = {k: (a.get(k) or 0) + (b.get(k) or 0) for k in ("tokens_in", "tokens_out", "cached_tokens")}
+    if a.get("cost_usd") is not None or b.get("cost_usd") is not None:
+        out["cost_usd"] = (a.get("cost_usd") or 0.0) + (b.get("cost_usd") or 0.0)
+    return out
+
+
 # build_context() is GONE, deliberately. pack_chunks() already returns a formatted
 # context, and keeping both meant two functions formatting the same sources two
 # different ways - `[i] src page N` here and `[Source n] ...` in context_budget.py.
@@ -337,24 +383,16 @@ def generate(query: str, chunks: list[dict], tenant_id: str | None = None, model
         model = _gateway_route(model)
     # 4.5's context_budget, wired. Until now settings.max_context_tokens was
     # declared in config.py and read by nothing, so a long retrieval went to
-    # the model whole and the budget was decorative.
-    # THREE values, not one. pack_chunks returns (context, packed, dropped) - 4.5's
-    # contract, and its own docstring says so. Assigning the tuple to `chunks` and
-    # handing it to build_context() raised AttributeError: 'str' object has no
-    # attribute 'get' on EVERY request, while /health and /ready both stayed green.
-    context, packed, dropped = pack_chunks(
-        chunks, settings.max_context_tokens, estimate_tokens)
-    if dropped:
-        # Not silent. A dropped chunk is a passage the model was never shown, and
-        # "the answer got worse after we added documents" starts here.
-        log.info(json.dumps({"event": "context_budget_drop",
-                             "packed": len(packed), "dropped": len(dropped)}))
+    # the model whole and the budget was decorative. _pack() packs inside what is
+    # left of it after the prompt's fixed parts (_budget, 12 September 2026).
+    context, packed = _pack(query, chunks)
     prompt = f"{SYSTEM}{_dated_rule(packed)}\n\nContext:\n{context}\n\nQuestion: {query}"
 
     if backend == "gateway":
         r = _gateway_call(prompt, packed, tenant_id, settings.max_answer_tokens, model)
     else:
         r, model = _call_or_fallback(prompt, packed, tenant_id, settings.max_answer_tokens, model)
+    billed = {**_usage(r), "cost_usd": getattr(r, "cost_usd", None)}   # every paid attempt counts: this one, and the retry
     draft = _draft(r)
     if draft is None and _finish_reason(r) == "MAX_TOKENS":
         # Cut off, not refused. A statute answer with its quotes - and, on the 3.x family,
@@ -369,6 +407,9 @@ def generate(query: str, chunks: list[dict], tenant_id: str | None = None, model
             r = _gateway_call(prompt, packed, tenant_id, settings.max_answer_tokens * 3, model)
         else:
             r, model = _call_or_fallback(prompt, packed, tenant_id, settings.max_answer_tokens * 3, model)
+        # The first attempt was billed too. Rebinding `r` dropped it from the row until 12 September 2026 (6.2):
+        # a truncated-then-retried answer cost the tenant two calls and was counted as one.
+        billed = _add(billed, {**_usage(r), "cost_usd": getattr(r, "cost_usd", None)})
         draft = _draft(r)
     if draft is None:
         # NOT a refusal. This used to substitute answerable=False, confidence="low" and no
@@ -388,16 +429,14 @@ def generate(query: str, chunks: list[dict], tenant_id: str | None = None, model
         **ans.model_dump(),
         model=model,
         backend=backend,
-        cost_usd=getattr(r, "cost_usd", None),
-        tokens_in=r.usage_metadata.prompt_token_count or 0,
-        tokens_out=r.usage_metadata.candidates_token_count or 0,
+        **billed,            # tokens_in, tokens_out (thinking included), cached_tokens, cost_usd - across every attempt
         latency_ms=0,
     )
 
 
 def generate_stream(query: str, chunks: list[dict], tenant_id: str | None = None, model: str | None = None,
                     backend: str | None = None):
-    """Yield ("token", text) as the model produces it, then ("usage", dict).
+    """Yield ("packed", chunks) once, then ("token", text) as the model produces it, then ("usage", dict).
 
     REAL streaming, unlike the version this replaced, which called the blocking
     generate(), waited for the whole answer and then split it on whitespace.
@@ -405,14 +444,14 @@ def generate_stream(query: str, chunks: list[dict], tenant_id: str | None = None
     token as /v1/query - the feature was absent and the demo could not show it.
 
     No response_schema here on purpose: you cannot usefully stream structured
-    JSON. The citations do not need it - they are known BEFORE generation, from
-    retrieval - so /v1/stream sends them first and streams only the prose.
+    JSON. The citations do not need it - they are known BEFORE generation - but
+    they are the PACKED set, not the reranked pool: the budget may drop a chunk
+    between the reranker and the prompt, and a citation to a passage the model
+    never read is not a citation. So the first event is the packed list
+    (12 September 2026, R06) and /v1/stream cites from it before the first token.
     """
-    context, packed, dropped = pack_chunks(
-        chunks, settings.max_context_tokens, estimate_tokens)
-    if dropped:
-        log.info(json.dumps({"event": "context_budget_drop",
-                             "packed": len(packed), "dropped": len(dropped)}))
+    context, packed = _pack(query, chunks)
+    yield "packed", packed
     prompt = f"{SYSTEM}{_dated_rule(packed)}\n\nContext:\n{context}\n\nQuestion: {query}"
 
     model = model or settings.generator_model
@@ -420,6 +459,13 @@ def generate_stream(query: str, chunks: list[dict], tenant_id: str | None = None
     if backend == "gateway":
         yield from _gateway_stream(prompt, packed, tenant_id, _gateway_route(model))
         return
+    yield from _vertex_stream(prompt, packed, tenant_id, model)
+
+
+def _vertex_stream(prompt: str, packed: list[dict], tenant_id: str | None, model: str):
+    """The tokens and the usage from google.genai - and, on an exhausted routed tier before the first token,
+    the default model's instead (F45). Below generate_stream so the packed event is yielded exactly once,
+    whichever model ends up answering."""
     usage = {"tokens_in": 0, "tokens_out": 0}
     yielded = 0
     try:
@@ -436,21 +482,17 @@ def generate_stream(query: str, chunks: list[dict], tenant_id: str | None = None
                 yielded += 1
                 yield "token", part.text
             if part.usage_metadata:
-                # The last chunk carries the totals; earlier ones may carry partials.
-                usage = {"tokens_in": part.usage_metadata.prompt_token_count or 0,
-                         "tokens_out": part.usage_metadata.candidates_token_count or 0,
-                         # 10.2's caching only shows up in the bill if something
-                         # records it. This is that something.
-                         "cached_tokens": getattr(
-                             part.usage_metadata,
-                             "cached_content_token_count", 0) or 0}
+                # The last chunk carries the totals; earlier ones may carry partials. Thinking counts as
+                # output (6.2), and 10.2's caching only shows up in the bill if something records it.
+                # This is that something.
+                usage = _usage(part)
     except errors.APIError as e:
         # An exhausted routed tier before the first token: the default model streams instead (F45).
         if yielded or not _exhausted_tier(e, model):
             raise
         log.warning(json.dumps({"event": "tier_exhausted", "tenant": tenant_id, "model": model,
                                 "fallback": settings.generator_model}))
-        yield from generate_stream(query, chunks, tenant_id, model=settings.generator_model)
+        yield from _vertex_stream(prompt, packed, tenant_id, settings.generator_model)
         return
     # The model that answered, for the usage row: the tier, or the default it fell back to.
     yield "usage", {**usage, "model": model}

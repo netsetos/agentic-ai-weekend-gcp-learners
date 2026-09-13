@@ -36,7 +36,7 @@ resource "google_storage_bucket" "tts_cache" {
 
 # 9.4's Media Studio bucket (gap G8). Same shape as tts_cache: india_region, uniform access,
 # a 30-day delete rule - generated media is a cache, not a record. The AUDIT row that says it
-# existed is the record, and that bucket is retention-locked for five years. The cors block is
+# existed is the record, and that bucket keeps its rows for five years. The cors block is
 # not optional: a browser PUT to a signed URL is a cross-origin request, and without it the
 # upload fails in the browser while working perfectly from curl.
 resource "google_storage_bucket" "media" {
@@ -80,13 +80,18 @@ resource "google_storage_bucket" "audit" {
   uniform_bucket_level_access = true
   retention_policy {
     retention_period = 157680000   # 5 years -- audit/RBI retention best practice (DPDP Act sets no fixed number)
-    is_locked        = true
+    # Locked on the full profile only (12 September 2026). A LOCKED policy is irreversible: the bucket cannot be
+    # deleted until its last object ages out, and Google liens the project so the project cannot be deleted either -
+    # five years, for a throwaway lab. The term is the record's protection (an unlocked policy still refuses to delete
+    # or overwrite an object inside it); the lock is what a production account adds. So a lab keeps the term without it.
+    is_locked        = local.full
   }
 }
 
 # audit_log.emit refuses to drop an event, so a writer without this grant fails its request
 # outright: the worker (doc.upload, dlp.finding) and the API's media router (9.4) write here.
-# objectCreator, not objectAdmin - the bucket is retention-locked and nothing may delete.
+# objectCreator, not objectAdmin - the bucket's retention policy refuses every delete (locked on the full profile),
+# so nothing may delete.
 resource "google_storage_bucket_iam_member" "ingest_audit" {
   bucket = google_storage_bucket.audit.name
   role   = "roles/storage.objectCreator"

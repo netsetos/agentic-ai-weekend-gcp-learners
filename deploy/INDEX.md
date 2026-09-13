@@ -9,10 +9,10 @@ Lesson ids ending in `p` are practice labs.
 |---|---|---|
 | A owned: extracted verbatim from a notebook heredoc | 86 | 0 |
 | B pasted: a block carried verbatim by notebooks | 1 | 0 |
-| C used: imported, read, run or excerpted by notebook code | 74 | 23 |
+| C used: imported, read, run or excerpted by notebook code | 75 | 25 |
 | D prose: named in a notebook's text only | 0 | 0 |
 | E unreferenced by any notebook | 0 | 42 |
-| total | 161 | 65 |
+| total | 162 | 67 |
 
 ## A. owned: extracted verbatim from a notebook heredoc (86)
 
@@ -111,7 +111,7 @@ Lesson ids ending in `p` are practice labs.
 |---|---|---|---|
 | `shared/documind_corpus.py` | code | - | 2.3,4.2,4.2p,4.5,4.5p |
 
-## C. used: imported, read, run or excerpted by notebook code (97)
+## C. used: imported, read, run or excerpted by notebook code (100)
 
 | File | Kind | Owner | Shown by |
 |---|---|---|---|
@@ -121,10 +121,11 @@ Lesson ids ending in `p` are practice labs.
 | `README.md` | data | - | 12.2,12.7 |
 | `UNOWNED.md` | data | - | 12.7,12.8 |
 | `evals/README.md` | data | - | 12.7 |
-| `evals/ablate.py` | code | - | 4.8 |
+| `evals/ablate.py` | code | - | 12.2,12.3,4.8 |
 | `evals/build_corpus.py` | code | - | 4.7 |
 | `evals/build_golden.py` | code | - | 12.7,4.7 |
 | `evals/build_media.py` | code | - | 9.1 |
+| `evals/cache_threshold.py` | code | - | 12.6 |
 | `evals/corpus/acme/annual_report_2026.md` | data | - | 4.6 |
 | `evals/corpus/acme/annual_report_2026_fig3.png` | data | - | 9.1,9.2,9.3,9.4,9.5,9.6 |
 | `evals/corpus/acme/code_on_wages_2019.pdf` | data | - | 12.5 |
@@ -140,12 +141,14 @@ Lesson ids ending in `p` are practice labs.
 | `evals/corpus/zeta/msa_zeta_2026.md` | data | - | 12.5 |
 | `evals/demo/hr_policy_2026_v2.md` | data | - | 12.5,4.7,4.8 |
 | `evals/fetch_real.py` | code | - | 12.5,12.7,4.2,4.7 |
-| `evals/golden.jsonl` | data | - | 10.1,10.3,10.4,10.5,10.6,11.4,12.1,12.2,12.3,12.5,12.7,12.8,13.2,13.4,4.2p,4.7,4.8,5.5,7.2,7.3,8.1,8.2,8.5,8.6,8.7,9.1,9.2,9.3 |
+| `evals/golden.jsonl` | data | - | 10.1,10.3,10.4,10.5,10.6,11.4,12.1,12.2,12.3,12.5,12.6,12.7,12.8,13.2,13.4,4.2p,4.7,4.8,5.5,7.2,7.3,8.1,8.2,8.5,8.6,8.7,9.1,9.2,9.3 |
 | `evals/judge.py` | code | - | 10.1,10.2,10.3,10.4,10.4p,10.5,10.6,11.1,11.2,11.3,11.4,11.5,12.1,12.2,12.3,12.4,12.5,12.6,12.7,12.8,3.2p,3.2,4.7 |
 | `evals/make_evalset.py` | code | - | 5.5 |
 | `evals/make_trainset.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,12.2 |
 | `evals/manifest.json` | data | - | 10.1,10.2,10.5,11.5,12.1,12.7,2.3,4.2,4.2p,4.5,4.5p,4.7,9.3 |
+| `evals/paraphrases.jsonl` | data | - | 12.5 |
 | `evals/real_sources.json` | data | - | 12.7,4.1,4.1p,4.2,4.2p,4.3,4.5,4.5p,9.1 |
+| `evals/required.json` | data | - | 10.1p,10.4p,10.6,12.1p,12.2p,12.2,12.4p,12.4,12.7,12.8,2.4p,4.7,5.3,5.5,6.1,6.1p,6.3,6.3p,6.4,7.1p,7.2p |
 | `evals/sft/documind_sft_v1.chat.jsonl` | data | - | 10.5 |
 | `evals/sft/documind_sft_v1.manifest.json` | data | - | 10.1,10.5 |
 | `evals/sft/documind_sft_v1.vertex.jsonl` | data | - | 10.1 |
