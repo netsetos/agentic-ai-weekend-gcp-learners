@@ -37,9 +37,11 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    goes to the batch lane - `ingest_batch/{doc_key}` written, the claim set to `queued`, `ingest_queued_batch`
    logged - and waits there: **the consumer for `ingest_batch/` is not built** (section 8). Anything else is
    counted by the parser. Text is chunked by **section** when it has `## ` headings (a handbook: one chunk per
-   clause, the clause code as the locator), otherwise fixed 2,000-character windows with a 200 overlap, page-
-   aware (`p7-1`). Every chunk gets `chunk_hash` (sha256 of its whitespace-collapsed text). The same two rules
-   live in `shared/documind_corpus.py`, so a notebook mints the same chunk texts. One DLP scan per document.
+   clause, the clause code as the locator), otherwise fixed 2,000-character windows with a 200 overlap, cut
+   page by page so a window never crosses a form feed (`p7-1`; a mirror's `<!-- -->` provenance header is
+   dropped). Every chunk gets `chunk_hash` (sha256 of its whitespace-collapsed text). The same two rules live in
+   `shared/documind_corpus.py`, so a notebook mints the same chunk texts, hashes and locators - the gate holds a
+   29-page mirror to 65 identical chunks from either chunker (12 September 2026). One DLP scan per document.
 4. **Carry-over.** The previous version's current rows of this source are read by hash; a vector is reused only
    when its `embedding_model@embedding_version` is the configured one. The misses are embedded. `reused` and
    `embedded` are the counts every later line carries.

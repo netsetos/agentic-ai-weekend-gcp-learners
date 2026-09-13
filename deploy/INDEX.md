@@ -182,10 +182,10 @@ Lesson ids ending in `p` are practice labs.
 | `services/litellm/gcp_id_token.py` | code | - | 11.3 |
 | `services/litellm/requirements.txt` | code | - | 11.3,12.7 |
 | `services/litellm/token_proxy.py` | code | - | 11.3 |
-| `services/rag-api/budget.py` | code | - | 10.3,12.2 |
+| `services/rag-api/budget.py` | code | - | 10.3,12.2,4.5 |
 | `services/rag-api/cache_admin.py` | code | - | 10.2 |
 | `services/rag-api/cache_manager.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,12.2,12.5,12.6,4.5,4.5p |
-| `services/rag-api/context_budget.py` | code | - | 12.2 |
+| `services/rag-api/context_budget.py` | code | - | 12.2,4.5 |
 | `services/rag-api/hybrid.py` | code | - | 10.4p,11.3p,12.2,4.5,4.5p,4.6,4.8,5.5 |
 | `services/rag-api/router.py` | code | - | 10.1,10.2,10.3,10.3p,10.4,10.5,10.6,11.1p,11.2p,11.3,11.3p,12.1,12.2,12.6,3.3,3.3p,5.5,6.4,8.2 |
 | `services/slm/Dockerfile` | code | - | 10.5,11.4 |

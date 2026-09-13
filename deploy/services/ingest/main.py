@@ -146,16 +146,20 @@ def _chunk(text: str) -> list[dict]:
 
     A handbook - Markdown with `## ` headings - is one chunk per section, the clause code in the heading
     (NP-03, IT-SEC-04) or the section's ordinal as the locator, a long section windowed within itself.
-    Anything else is fixed windows: a text upload marks its page breaks with a form feed (the kit's
-    real-document mirrors, evals/fetch_real.py, do; so does _parse's page count), a chunk that starts on
-    page 7 is cited as page 7 - the same page_start shared/documind_corpus.py mints for the same bytes in a
-    notebook - and its locator is the page and the window's ordinal on it (p7-1). Text without form feeds
-    has no page to name, and None is more honest than 1. Every chunk carries the hash of its text: the
-    carry-over in indexer.py matches on it, so a one-clause edit embeds one clause."""
-    text = text.strip()
-    heads = list(_SECTION.finditer(text))
+    Anything else is fixed windows. A text upload marks its page breaks with a form feed (the kit's
+    real-document mirrors, evals/fetch_real.py, do; so does parser.py between Doc AI pages), and the windows
+    are cut PER PAGE (12 September 2026): a window never crosses a page break, a chunk that starts on page 7
+    is cited as page 7, and its locator is the page and the window's ordinal on it (p7-1) - the same texts,
+    hashes and locators shared/documind_corpus.py mints for the same bytes in a notebook, so a mirror seeded
+    there and the same file uploaded here are one set of chunks, not two. Text without form feeds has no
+    page to name, and None is more honest than 1. A mirror's provenance header - the leading <!-- ... -->
+    fetch_real.py writes - is not content and is dropped the way the loader drops it. Every chunk carries
+    the hash of its text: the carry-over in indexer.py matches on it, so a one-clause edit embeds one clause."""
+    text = re.sub(r"\A\s*<!--.*?-->\s*", "", text, count=1, flags=re.S)
+    heads = list(_SECTION.finditer(text.strip()))
     out = []
     if heads:
+        text = text.strip()
         pre = text[:heads[0].start()].strip()
         for k, (_, piece) in enumerate(_windows(pre)):
             out.append({"text": piece, "kind": "text", "page_start": None,
@@ -170,13 +174,10 @@ def _chunk(text: str) -> list[dict]:
                             "locator": key + (f"-{k}" if k else ""), "section": title})
     else:
         paged = "\f" in text
-        on_page: dict[int, int] = {}
-        for i, (start, piece) in enumerate(_windows(text)):
-            page = text.count("\f", 0, start) + 1 if paged else None
-            k = on_page.get(page, 0)
-            on_page[page] = k + 1
-            out.append({"text": piece, "kind": "text", "page_start": page,
-                        "locator": f"p{page}-{k}" if paged else f"w{i}", "section": None})
+        for p, page in enumerate(text.split("\f"), 1):
+            for k, (_, piece) in enumerate(_windows(page)):
+                out.append({"text": piece, "kind": "text", "page_start": p if paged else None,
+                            "locator": f"p{p}-{k}" if paged else f"w{k}", "section": None})
     for c in out:
         c["chunk_hash"] = chunk_hash(c["text"])
     return out

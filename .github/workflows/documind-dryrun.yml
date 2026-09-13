@@ -101,3 +101,5 @@ jobs:
         run: python tools/check_retrieval.py
       - name: Gate - the evaluator (the scorer against a fake API)
         run: python tools/check_eval_gate.py
+      - name: Gate - the Colab links (one learner branch, the right one)
+        run: python tools/check_colab_links.py
