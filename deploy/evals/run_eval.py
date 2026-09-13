@@ -477,7 +477,7 @@ def check_isolation(api_url, golden, token, outsider_token=None) -> tuple[float,
     # Under IAP (AUTH_MODE=iap) the API ignores x-user-email: the caller IS the bearer token's
     # account (shared/iap.py's other leg). So the outsider has to be a second token, minted
     # for an account that may invoke the service and sits on no roster - `make eval-live`
-    # uses documind-chat-sa. With one token every row would carry the same, rostered identity
+    # mints it for documind-outsider-sa (sa.tf). With one token every row would carry the same, rostered identity
     # and this gate could not turn red.
     rows = [r for r in golden if r["shape"] == "isolation"]
     got, bad = 0, []

@@ -46,7 +46,7 @@ REFERENCE_TRAJECTORY = [{"tool_name": "retrieve"}]        # one grounded answer 
 def collect(api_url: str, golden: list[dict], token: str | None, member: str, limit: int = 0) -> list[dict]:
     rows = []
     for row in golden[: limit or None]:
-        status, body = ask(api_url, row["question"], row["tenant"], member, token)
+        status, body, _ = ask(api_url, row["question"], row["tenant"], member, token)   # (status, body, ms) since 12 September
         if status != 200:
             rows.append({**row, "status": status, "response": "", "context": "", "cited": []})
             continue
@@ -213,7 +213,9 @@ def evaluate(df, experiment: str, run_name: str, pairwise: bool, project: str, l
     from vertexai.evaluation import EvalTask, MetricPromptTemplateExamples, PairwiseMetric
     vertexai.init(project=project, location=location, experiment=experiment)
     names, metrics = pointwise_metrics()
-    print(f"  pointwise: {' + '.join(names)}  (templates {template_hash(names)})")
+    stamp = template_hash(names)
+    run_name = f"{run_name}-t{stamp}"          # the judge is its prompt: the templates' hash rides in the run name
+    print(f"  pointwise: {' + '.join(names)}  (templates {stamp}; run {run_name})")
     if pairwise:
         metrics.append(PairwiseMetric(
             metric="pairwise_question_answering_quality",
@@ -232,6 +234,7 @@ def evaluate(df, experiment: str, run_name: str, pairwise: bool, project: str, l
         print("  judge: the service default (pass --judge-model to pin one)")
     result = EvalTask(dataset=df, metrics=metrics, experiment=experiment, **kwargs).evaluate(experiment_run_name=run_name)
     summary = dict(result.summary_metrics)
+    summary["run_name"] = run_name             # what Experiments recorded, template hash included
     # By shape, from the per-row table: a refusal row has no context to be grounded in, so the overall mean
     # mixes what the judge can score with what it cannot. The answerable shapes are the number that means something.
     try:
@@ -350,7 +353,7 @@ def main() -> int:
     label = a.label or revision_sha(a.api_url, a.project) or os.environ.get("GIT_SHA", "dev")
     run_name = f"api-{label}-{time.strftime('%Y%m%d-%H%M')}" + ("-vs-candidate" if a.api_b else "")
     summary = evaluate(df, a.experiment, run_name, pairwise=bool(a.api_b), project=a.project, judge_model=a.judge_model)
-    print(f"\n  Experiments run {a.experiment}/{run_name}:")
+    print(f"\n  Experiments run {a.experiment}/{summary.get('run_name', run_name)}:")
     for k in sorted(summary):
         if k.endswith("/mean") or "/mean[" in k or k.endswith("/std") or "win_rate" in k or k == "row_count":
             v = summary[k]
