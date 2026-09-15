@@ -328,7 +328,7 @@ def ready():
     from config import settings
     from retriever import _genai_client, _index_endpoint, _fs, _rag, _search
     _ = _genai_client(); _ = _fs()
-    if settings.retrieval_backend == "vector":      # the lean profile has no endpoint to warm
+    if settings.retrieval_backend == "vector":      # a Firestore-only deployment has no endpoint to warm
         _ = _index_endpoint()
     elif settings.retrieval_backend == "rag_engine":   # P9.4: vertexai's init, before the first question pays for it
         _ = _rag()

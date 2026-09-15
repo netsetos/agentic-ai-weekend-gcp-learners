@@ -32,12 +32,12 @@ on:
         description: Image tag to release (defaults to the commit SHA)
         required: false
         type: string
-      profile:
-        description: lean = the lane's release (a candidate revision, the live gate on it, a person, a traffic flip); full = Cloud Deploy
+      path:
+        description: candidate = a no-traffic revision, the live gate on it, a person, a traffic flip (the lane's release); clouddeploy = the Cloud Deploy pipeline (staging, the live gate, a person, a canary)
         required: false
         type: choice
-        options: [lean, full]
-        default: lean
+        options: [candidate, clouddeploy]
+        default: candidate
 
 permissions:
   contents: read
@@ -59,20 +59,20 @@ jobs:
       - name: Eval gate (offline)
         run: python deploy/evals/run_eval.py
 
-  # ---------------------------------------------------------------- the lane's release (lean)
+  # ---------------------------------------------------------------- the lane's release (path: candidate)
   # Module 10's seam as a pipeline, keyless. The same image tagged with the SHA; a candidate revision of documind-api
   # that takes no traffic (make release-candidate); the live gate on it - 65 rows, nine thresholds, as the roster
   # member and as the outsider, whose tokens the deploy identity may mint (wif.tf); then a PERSON, through the
   # production environment's required reviewers; then the traffic flip, which is also the rollback (make rollback).
   # No Cloud Deploy verb on this path: the previous revision never went away, and GET /version says which is live.
-  release-lean:
-    if: ${{ inputs.profile == 'lean' }}
+  release-candidate:
+    if: ${{ inputs.path == 'candidate' }}
     needs: eval-gate
     runs-on: ubuntu-latest
     env:
       PROJECT: ${{ vars.GCP_PROJECT }}
       REGION: ${{ vars.GCP_REGION }}
-    # The candidate's NAME travels to promote-lean as a job output (12 September 2026): the two jobs run on
+    # The candidate's NAME travels to promote as a job output (12 September 2026): the two jobs run on
     # different runners, deploy/.candidate-revision is one runner's file, and promote must move traffic to the
     # revision this job made and the gate judged - never to whatever is newest on the service by the time a
     # person approves.
@@ -95,7 +95,7 @@ jobs:
         run: echo "TAG=${IMAGE_TAG:-$GITHUB_SHA}" >> "$GITHUB_ENV"
       - name: Build the API image
         working-directory: deploy
-        run: make build PROJECT="$PROJECT" REGION="$REGION" SERVICES_lean=api GIT_SHA="$TAG"
+        run: make build PROJECT="$PROJECT" REGION="$REGION" SERVICES=api GIT_SHA="$TAG"
       - name: A candidate revision, no traffic
         id: candidate
         working-directory: deploy
@@ -122,15 +122,15 @@ jobs:
           NUMBER=$(gcloud projects describe "$PROJECT" --format='value(projectNumber)')
           make eval-live PROJECT="$PROJECT" REGION="$REGION" API="https://candidate---documind-api-$NUMBER.$REGION.run.app"
 
-  promote-lean:
-    needs: release-lean
+  promote:
+    needs: release-candidate
     runs-on: ubuntu-latest
     environment: production      # the person: the environment's required reviewers approve, then traffic moves
     env:
       PROJECT: ${{ vars.GCP_PROJECT }}
       REGION: ${{ vars.GCP_REGION }}
       # Through the environment, never the script text (the rule Resolve tag follows below).
-      CANDIDATE: ${{ needs.release-lean.outputs.candidate }}
+      CANDIDATE: ${{ needs.release-candidate.outputs.candidate }}
     steps:
       - uses: actions/checkout@v4
       - id: auth
@@ -139,17 +139,19 @@ jobs:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
           service_account: ${{ vars.CICD_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@v3
-      # The revision release-lean made, by name, into the file make promote reads; a value that is not a
+      # The revision release-candidate made, by name, into the file make promote reads; a value that is not a
       # documind-api revision stops here. make promote itself refuses if the candidate tag has moved on since.
       - name: Traffic to the candidate, by name (the release; the previous revision never went away)
         working-directory: deploy
         run: |
-          case "$CANDIDATE" in documind-api-*) ;; *) echo "no candidate revision came out of release-lean: '$CANDIDATE'" >&2; exit 1 ;; esac
+          case "$CANDIDATE" in documind-api-*) ;; *) echo "no candidate revision came out of release-candidate: '$CANDIDATE'" >&2; exit 1 ;; esac
           printf '%s\n' "$CANDIDATE" > .candidate-revision
           make promote PROJECT="$PROJECT" REGION="$REGION"
 
-  release:
-    if: ${{ inputs.profile == 'full' }}
+  # ---------------------------------------------------------------- Cloud Deploy (path: clouddeploy)
+  # The pipeline clouddeploy.tf declares: staging, the live gate against it, a person, then a 10% canary in prod.
+  release-clouddeploy:
+    if: ${{ inputs.path == 'clouddeploy' }}
     needs: eval-gate          # red above means this job never starts
     runs-on: ubuntu-latest
     env:

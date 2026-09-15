@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Per-tenant rupees from the usage rows, on the lean lane. Lesson 12.3 (10 September 2026).
+"""Per-tenant rupees from the usage rows in Cloud Logging. Lesson 12.3 (10 September 2026).
 
     python evals/usage_rows.py --project P --hours 24            # or: make usage PROJECT=... HOURS=24
     python evals/usage_rows.py --selftest
 
-The full profile answers "who spent what" with tenant_daily, a BigQuery view over the log sink. The lean lane has no
-sink and no dataset - but it has the same rows, because the API logs ONE shape on every answer (12.2's usage_row)
+tenant_daily, the BigQuery view over the log sink, answers "who spent what" once the sink has copied the rows and the
+day has closed. The same rows are in Cloud Logging first, because the API logs ONE shape on every answer (12.2's usage_row)
 and Cloud Logging keeps them for thirty days. This reads the last N hours of those rows through gcloud and groups
 them the way the view does: by tenant, by model and backend, by brain. Same GROUP BY, different store; 10.3's
 attribution cell, as a tool. Rates are the API's own (cost_usd is priced at the model that answered, or by the

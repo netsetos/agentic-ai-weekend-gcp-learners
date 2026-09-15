@@ -59,8 +59,8 @@ def collect(api_url: str, golden: list[dict], token: str | None, member: str, li
 
 
 def chunk_texts(project: str, ids: list[str]) -> dict[str, str]:
-    """The cited chunks' full text from the lane's store (lean: Firestore `chunks/{chunk_id}`, what the indexer
-    wrote). Empty on any failure - the caller falls back to the quotes and says so."""
+    """The cited chunks' full text from Firestore `chunks/{chunk_id}` - what the indexer wrote, whichever backend
+    served the query. Empty on any failure - the caller falls back to the quotes and says so."""
     if not ids or not project:
         return {}
     try:

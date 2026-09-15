@@ -11,8 +11,8 @@
 # upload of thirty objects is not a queue of cold-start refusals.
 #
 # RESIDENCY picks the processor the way docai.tf did (us: Layout Parser; india: OCR in Mumbai).
-# VECTOR_INDEX_NAME and BQ_CHUNK_TABLE are empty in the lean profile, which switches the
-# datapoint upsert and the BigQuery mirror off; the Firestore index is always written.
+# VECTOR_INDEX_NAME and BQ_CHUNK_TABLE come from the state (vector.tf, dataplex.tf): the datapoint
+# upsert and the BigQuery mirror run on every ingest, and the Firestore index is always written too.
 # 12 September 2026 (deploy/INDEXING.md): RETENTION_DAYS stamps expire_at on every retired row - the TTL policy's
 # number, variables.tf's retention_days; EMBEDDING_MODEL / EMBEDDING_VERSION are the ONE declared embedding, stamped
 # on every chunk row - the API embeds its queries with the same pair. make deploy-services passes all three.

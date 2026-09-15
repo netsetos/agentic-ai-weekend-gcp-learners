@@ -10,8 +10,8 @@
 # a GitHub runner, were both refused before any token was read.
 #
 # The env delimiter is ^|^ because the values carry ':' (every URL) and ',' (two audiences).
-# RETRIEVAL_BACKEND is firestore in the lean profile and vector in the full one, where the two
-# VECTOR_ variables come from `terraform output`; SELF_URL is the deterministic run.app URL.
+# RETRIEVAL_BACKEND=vector is the deployment's default (a tenant's pin can send it to the Firestore rung
+# or a managed store); the two VECTOR_ variables come from `terraform output`; SELF_URL is the deterministic run.app URL.
 # DEMO_MODE=1 (Module 9): /v1/media/generate serves a cached image for a prompt it has drawn before,
 # so a demo re-running one prompt is one bill; DEMO_MODE=0 make deploy-services turns it off. The two
 # bucket names are storage.tf's: generated assets in media, 9.4's signed PUTs into uploads.

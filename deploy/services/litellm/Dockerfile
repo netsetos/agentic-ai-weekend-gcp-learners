@@ -10,11 +10,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Download spaCy model for Presidio NER
 RUN python -m spacy download en_core_web_lg
 
-# The guardrail, the token proxy that fronts the Cloud Run backends, and both profiles' configs.
-# LITELLM_CONFIG at deploy time picks one (config.lean.yaml on the lean lane); entrypoint.sh
+# The guardrail, the token proxy that fronts the Cloud Run backends, and the one config; entrypoint.sh
 # starts the proxy beside litellm.
 COPY documind_classifier.py documind_router.py dlp_audit.py gcp_id_token.py token_proxy.py ./
-COPY config.yaml config.lean.yaml ./
+COPY config.yaml ./
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

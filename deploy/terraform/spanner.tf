@@ -7,18 +7,16 @@
 # lesson. The trial for this cohort stops Fri 4 Dec 2026 - the `pricing` row re-runs
 # 4.6 before then or moves it to the Neo4j Free mirror.
 resource "google_spanner_instance" "graph" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   name             = "documind-graph"
-  config           = "regional-asia-south1"   # graph data at rest stays in Mumbai
+  config           = "regional-asia-south1" # graph data at rest stays in Mumbai
   display_name     = "DocuMind knowledge graph"
-  edition          = "ENTERPRISE"             # Spanner Graph needs it
-  processing_units = 100                      # the trial minimum
+  edition          = "ENTERPRISE" # Spanner Graph needs it
+  processing_units = 100          # the trial minimum
   force_destroy    = false
 }
 
 resource "google_spanner_database" "graph" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  instance = google_spanner_instance.graph[0].name
+  instance = google_spanner_instance.graph.name
   name     = "documind"
 
   # Byte-for-byte the DDL 4.6 applies, so a learner who ran the notebook and an
@@ -63,18 +61,16 @@ resource "google_spanner_database" "graph" {
 # The graph-builder job reads chunks and writes nodes/edges. It is a job, not a
 # service: it runs per document off the graph-jobs topic and exits.
 resource "google_service_account" "graph_builder" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   account_id   = "documind-graph-sa"
   display_name = "DocuMind graph-builder job"
 }
 
 resource "google_spanner_database_iam_member" "graph_builder" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  instance = google_spanner_instance.graph[0].name
-  database = google_spanner_database.graph[0].name
+  instance = google_spanner_instance.graph.name
+  database = google_spanner_database.graph.name
   role     = "roles/spanner.databaseUser"
-  member   = "serviceAccount:${google_service_account.graph_builder[0].email}"
+  member   = "serviceAccount:${google_service_account.graph_builder.email}"
 }
 
-output "spanner_instance" { value = one(google_spanner_instance.graph[*].name) }
-output "spanner_database" { value = one(google_spanner_database.graph[*].name) }
+output "spanner_instance" { value = google_spanner_instance.graph.name }
+output "spanner_database" { value = google_spanner_database.graph.name }

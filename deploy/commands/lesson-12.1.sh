@@ -55,8 +55,7 @@ terraform init -reconfigure -backend-config="bucket=documind-ai-YOUR-ID-tfstate"
 terraform plan -out=tfplan \
   -var=project_id=documind-ai-YOUR-ID \
   -var=billing_account_id=YOUR-BILLING-ID \
-  -var=github_repository_id=1358872052 \
-  -var=profile=lean
+  -var=github_repository_id=1358872052
 
 # Apply when plan is green
 terraform apply tfplan

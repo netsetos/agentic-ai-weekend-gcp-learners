@@ -2,8 +2,9 @@
 #
 # Everything GPU-shaped on the lane is explicit and ends the day at zero - by hand (make off) and, from tonight, by
 # this job: a Cloud Run job on the gcloud image, run by Cloud Scheduler at 23:00 IST, that sets min-instances 0 on
-# documind-slm, documind-vllm, documind-gateway and documind-ui wherever a floor is above zero, and deletes the
-# Autopilot cluster if one was left behind. It never builds or deploys anything. A forgotten L4 then costs an evening
+# documind-slm, documind-vllm, documind-gateway and documind-ui wherever a floor is above zero. (Until 15 September
+# 2026 it also deleted a leftover Autopilot cluster; the cluster is Terraform's now, gke.tf, and make gke-down
+# removes only the workload.) It never builds or deploys anything. A forgotten L4 then costs an evening
 # (11.4: Rs 121 an hour), not a month (Rs 86,904). Updating a service mints a revision that runs AS that service's
 # account, which is why the job's account needs actAs on each of them - the default compute account included, which
 # is what make deploy-slm runs the SLM as. The alarm for the same condition is alerts.tf's gpu_left_warm; the ceiling
@@ -54,11 +55,7 @@ locals {
       else gcloud run services update "$s" --region "$r" --project "$PROJECT" --min-instances 0 --quiet && echo "$s: min-instances $f -> 0"
       fi
     done
-    if gcloud container clusters describe documind-autopilot --region "$REGION" --project "$PROJECT" >/dev/null 2>&1; then
-      gcloud container clusters delete documind-autopilot --region "$REGION" --project "$PROJECT" --quiet && echo "documind-autopilot: deleted - the cluster fee stops; terraform notices on the next plan"
-    else
-      echo "documind-autopilot: absent"
-    fi
+    echo "documind-autopilot: Terraform's since 15 September 2026 (gke.tf) - make gke-down removes the vLLM workload, make down the cluster"
     EOT
 }
 
@@ -104,7 +101,7 @@ resource "google_cloud_run_v2_job_iam_member" "off_invoker" {
 # make off-now runs the same job on demand; make off runs the same four switches from a shell.
 resource "google_cloud_scheduler_job" "off" {
   name        = "documind-off-nightly"
-  description = "DocuMind: floor the GPU services, the gateway and the UI to zero and delete a leftover Autopilot cluster"
+  description = "DocuMind: floor the GPU services, the gateway and the UI to zero (the Autopilot cluster is Terraform's; its workload is make gke-down's)"
   schedule    = "0 23 * * *"
   time_zone   = "Asia/Kolkata"
   region      = var.region

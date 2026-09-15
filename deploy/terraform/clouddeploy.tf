@@ -5,7 +5,6 @@
 # at any point. (The `targets` group is not optional - there is no bare
 # `gcloud deploy rollback`, and finding that out during an incident is the wrong time.)
 resource "google_clouddeploy_target" "staging" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   location = var.region
   name     = "documind-staging"
   run { location = "projects/${var.project_id}/locations/${var.region}" }
@@ -17,7 +16,6 @@ resource "google_clouddeploy_target" "staging" {
 }
 
 resource "google_clouddeploy_target" "prod" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   location = var.region
   name     = "documind-prod"
   run { location = "projects/${var.project_id}/locations/${var.region}" }
@@ -32,16 +30,15 @@ resource "google_clouddeploy_target" "prod" {
 }
 
 resource "google_clouddeploy_delivery_pipeline" "documind" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   location = var.region
   name     = "documind"
   serial_pipeline {
     stages {
-      target_id = google_clouddeploy_target.staging[0].name
+      target_id = google_clouddeploy_target.staging.name
       profiles  = ["staging"]
     }
     stages {
-      target_id = google_clouddeploy_target.prod[0].name
+      target_id = google_clouddeploy_target.prod.name
       profiles  = ["prod"]
       strategy {
         canary {
@@ -66,4 +63,4 @@ resource "google_clouddeploy_delivery_pipeline" "documind" {
   }
 }
 
-output "delivery_pipeline" { value = one(google_clouddeploy_delivery_pipeline.documind[*].name) }
+output "delivery_pipeline" { value = google_clouddeploy_delivery_pipeline.documind.name }

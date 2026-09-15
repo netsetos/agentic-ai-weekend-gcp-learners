@@ -81,7 +81,7 @@ def release(db: firestore.Client, doc_key: str, error: str) -> None:
 # the per-version claim; `sources/{source_id}` is the per-document ledger: which version is current, its generation,
 # when it was indexed, the date it declares. It is what every production indexer keeps (a record manager keyed on the
 # source), and it is what lets a re-issued document RETIRE its predecessor's chunks instead of standing beside them.
-# Retiring is a flag, never a delete: the audit story survives, the full profile's mirrors keep their history, and a
+# Retiring is a flag, never a delete: the audit story survives, the ANN tier's and the managed stores' mirrors keep their history, and a
 # bad re-index is undone by uploading the previous bytes again (reactivate) - nothing is re-embedded.
 #
 # 12 September 2026 (deploy/INDEXING.md): the guard, the swap, the retention and the fingerprint. An event older than
@@ -188,7 +188,7 @@ def retire_previous(db: firestore.Client, tenant_id: str, gcs_uri: str, keep_doc
 
     keep_doc_key=None retires the whole source (reconcile: the object is gone from the bucket). Two equality filters
     need no composite index. Returns the retired keys, ids and count - the worker removes the ids from Vector Search
-    on the full profile and logs the count."""
+    and logs the count."""
     retired_keys, retired_ids = set(), []
     state, pending = [db.batch()], 0
     query = (db.collection(chunks_collection).where("tenant_id", "==", tenant_id)

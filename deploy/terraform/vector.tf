@@ -2,7 +2,6 @@
 # Modules 4 and 12.2 have been querying an index that the course never created -
 # this is it.
 resource "google_vertex_ai_index" "documind" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   region       = var.region
   display_name = "documind-chunks"
   description  = "DocuMind chunk embeddings, 768-d, streaming upserts"
@@ -29,7 +28,6 @@ resource "google_vertex_ai_index" "documind" {
 }
 
 resource "google_vertex_ai_index_endpoint" "documind" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   region                  = var.region
   display_name            = "documind-endpoint"
   public_endpoint_enabled = true
@@ -40,9 +38,8 @@ resource "google_vertex_ai_index_endpoint" "documind" {
 # is why it is easy to leave out of the terraform and then wonder why
 # find_neighbors returns nothing against an index that plainly exists.
 resource "google_vertex_ai_index_endpoint_deployed_index" "documind" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  index_endpoint    = google_vertex_ai_index_endpoint.documind[0].id
-  index             = google_vertex_ai_index.documind[0].id
+  index_endpoint    = google_vertex_ai_index_endpoint.documind.id
+  index             = google_vertex_ai_index.documind.id
   deployed_index_id = "documind_chunks_v1"
   display_name      = "documind-chunks-v1"
 
@@ -61,15 +58,15 @@ resource "google_vertex_ai_index_endpoint_deployed_index" "documind" {
 # aiplatform.MatchingEngineIndexEndpoint(), which wants the name.
 output "vector_index_endpoint" {
   description = "VECTOR_INDEX_ENDPOINT for rag-api"
-  value       = one(google_vertex_ai_index_endpoint.documind[*].id)
+  value       = google_vertex_ai_index_endpoint.documind.id
 }
 
 output "vector_deployed_index_id" {
   description = "VECTOR_DEPLOYED_INDEX_ID for rag-api"
-  value       = one(google_vertex_ai_index_endpoint_deployed_index.documind[*].deployed_index_id)
+  value       = google_vertex_ai_index_endpoint_deployed_index.documind.deployed_index_id
 }
 
 output "vector_index_name" {
   description = "VECTOR_INDEX_NAME for the ingest worker's upsert_datapoints"
-  value       = one(google_vertex_ai_index.documind[*].id)
+  value       = google_vertex_ai_index.documind.id
 }

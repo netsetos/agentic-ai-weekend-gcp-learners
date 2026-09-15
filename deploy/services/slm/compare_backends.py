@@ -79,8 +79,8 @@ def ask(backend: str, question: str, chunks: list[dict]) -> tuple[dict, int, int
     import requests
 
     url = os.environ["LITELLM_URL"].rstrip("/") + "/v1/chat/completions"
-    # On the lean lane the gateway is behind Cloud Run IAM and the door is an ID token for its URL (make compare mints
-    # one as the roster member); the master key is the full profile's. Either rides in the same header.
+    # The gateway is behind Cloud Run IAM and the door is an ID token for its URL (make compare mints one as the
+    # roster member); a master key, when a deployment sets one, rides in the same header.
     key = os.environ.get("LITELLM_ID_TOKEN") or os.environ.get("LITELLM_MASTER_KEY", "")
     context = "\n".join(f"[Source {i}] {c.get('quote') or c.get('text', '')}" for i, c in enumerate(chunks, 1))
     r = requests.post(url, headers={"Authorization": f"Bearer {key}"}, timeout=120, json={

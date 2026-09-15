@@ -12,7 +12,7 @@ One knob per arm, everything else held (lesson 4.8, Part 5):
     dense 20 -> rerank 5          the lane's own path on this profile (retriever.py -> Rank API)
     dense 50 -> rerank 5          the same reranker over a deeper candidate list
     hybrid 20 -> rerank 5         4.5's RRF over the dense ids and a BM25 leg (alpha 0.7) - which the
-                                  lean profile does NOT wire: hybrid.py rides Vector Search only
+                                  Firestore rung does NOT wire: hybrid.py rides Vector Search only
     rag_engine 20 -> rerank 5     P9.4's backend from outside it (13 September 2026): 4.3's corpus - the
                                   mirror's, one RagFile per version named by its doc_key - queried by text,
                                   each context's doc_key resolved to its source through the kit's own rows.
@@ -136,7 +136,7 @@ class Lane:
         return query.where(filter=FieldFilter("current", "==", True)) if self.current_only else query
 
     def dense(self, question: str, tenant: str, k: int) -> list:
-        """The lane's retriever on the lean profile: find_nearest with the tenant pre-filter and the ledger's."""
+        """The lane's Firestore rung: find_nearest with the tenant pre-filter and the ledger's."""
         from google.cloud.firestore_v1.base_query import FieldFilter
         from google.cloud.firestore_v1.base_vector_query import DistanceMeasure
         from google.cloud.firestore_v1.vector import Vector

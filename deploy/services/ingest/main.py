@@ -354,7 +354,7 @@ async def push(request: Request):
                 return {"status": "withdrawn", "doc_key": doc.doc_key}
             back = reactivate(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
             if back is not None:
-                # The full profile first (12 September 2026): the ids remove_datapoints() took out go back up from
+                # The ANN tier first (12 September 2026): the ids remove_datapoints() took out go back up from
                 # the rows' own vectors BEFORE the newer version leaves the tier, so a reader there never finds none.
                 if INDEX_NAME:
                     reupsert(INDEX_NAME, _db, doc.tenant_id, doc.gcs_uri, doc.doc_key)
@@ -494,11 +494,11 @@ def index_document(doc: DocumentContract, msg: IngestMessage, content: bytes, la
         # THE SWAP. The new version is written STAGED - current=false, invisible to every reader - and then one
         # pass flips it current and retires the predecessor's rows (a flag, never a delete, expire_at set so the
         # TTL policy purges them after RETENTION_DAYS). A reader between the two steps still finds exactly one
-        # version. The full profile's ANN tier follows: the new ids go up after the swap, the retired ids come out.
+        # version. The ANN tier follows: the new ids go up after the swap, the retired ids come out.
         mirror_to_firestore(_db, doc, chunks, vectors, staged=True, stage_expire_at=_expire_at(STAGE_HOURS / 24))
         gone = swap_versions(_db, doc.tenant_id, doc.gcs_uri, doc.doc_key,
                              expire_at=_expire_at(RETENTION_DAYS), effective_to=doc.effective_from)
-        if INDEX_NAME:                       # the full profile; the lean one has no index
+        if INDEX_NAME:                       # the Vector Search index (vector.tf); a deployment without one skips the tier
             upsert(INDEX_NAME, to_datapoints(doc, chunks, vectors))
             if gone["retired_ids"]:
                 remove_datapoints(INDEX_NAME, gone["retired_ids"])

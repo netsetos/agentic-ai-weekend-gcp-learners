@@ -86,34 +86,39 @@ failing tool's own output folded under it - the raw job log of a public repo is 
 
 ---
 
-## Two profiles
+## One shape
 
-`PROFILE=lean` (the default) is the Module 4 lane and nothing else: `documind-api`,
-`documind-ui` and the `documind-ingest` worker on Cloud Run, Firestore with its two composite
-vector indexes, one Document AI processor, the uploads bucket, the service accounts, secrets,
-budget and alerts. Retrieval is Firestore's own vector search (`RETRIEVAL_BACKEND=firestore`)
-with the Ranking API rerank; nothing bills by the hour while idle.
+Until 15 September 2026 the kit had two profiles - `lean`, the Module 4 lane, and `full`, everything
+Module 12 teaches on top of it, count-gated in the same Terraform behind `local.full`. The course runs
+the full shape only now, so the switch is gone and `make up` stands up all of it: `documind-ingest`,
+`documind-api`, `documind-admin`, `documind-ui`, `documind-chat`, `documind-mcp` and `documind-agent` on
+Cloud Run; Firestore with its vector indexes and Vector Search with its endpoint (the ANN tier,
+`RETRIEVAL_BACKEND=vector` as the deployment's default, the Firestore rung beneath it); the Spanner
+Graph trial; the Cloud SQL checkpointer and the gateway's Cloud SQL; the Autopilot cluster; the BigQuery
+mirror, the log sink, the daily view and the Dataplex scan; Cloud Deploy; the managed stores of 4.3 and
+4.4 (`MANAGED_MIRROR=both`, `MANAGED_SEARCH=true`: `make up` switches RAG Engine to serverless mode,
+creates a corpus for every `any` tenant and pins acme to `rag_engine` and zeta to `vertex_search` -
+`make managed-stores`, after the roster - and `make down` deletes the corpora that would bill storage);
+one Document AI processor, the buckets, the accounts, secrets, budget and alerts. `make tenant-backend
+TENANT= RETRIEVAL_BACKEND=` moves one tenant by hand. It bills while it exists - the Vector Search
+endpoint, two Cloud SQL instances and the cluster by the hour - which is what `make off` (the night
+switch), `make down` and the throwaway project are for.
 
-`PROFILE=full` adds what Module 12 teaches on top - Vector Search and its endpoint (the ANN
-tier, `retrieval_mode=hybrid`), the Spanner Graph trial, the Cloud SQL checkpointer, GKE, the
-BigQuery mirror and Dataplex scan, the log sink, Cloud Deploy - and the admin and chat
-services. Same Terraform, `count = local.full ? 1 : 0` on the difference (`variables.tf`);
-flip the variable and apply again. Since 13 September 2026 (evening) full also runs the managed
-stores of 4.3 and 4.4, so a full deployment answers from every store the course teaches:
-`MANAGED_MIRROR=both` and `MANAGED_SEARCH=true` are its defaults, `make up` switches RAG Engine
-to serverless mode, creates a corpus for every `any` tenant and pins acme to `rag_engine` and
-zeta to `vertex_search` (`make managed-stores`, after the roster), and `make down` deletes the
-corpora that would bill storage (`make managed-stores-down`). On lean the same targets exist
-and stay off; `make tenant-backend TENANT= RETRIEVAL_BACKEND=` moves one tenant by hand.
+Two things the profile used to switch that are not resource counts are switches of their own, both
+false for a lab (`variables.tf`): `AUDIT_LOCK=true` locks the audit bucket's five-year retention
+(irreversible; it liens the project), and `GEMINI_QUOTA_OVERRIDE=true` applies `quota.tf`'s consumer
+quota override, whose metric names are unverified (an unknown one fails the apply). The shape as a
+whole has not yet been applied to a live project: the lean lane ran live from 6 September, and the
+first `make up` of the one shape is the first live test of the rest.
 
-Since Modules 7 and 8 joined the lane (September 2026) both profiles also deploy the agent
+Since Modules 7 and 8 joined the lane (September 2026) `make up` also deploys the agent
 surfaces: `documind-mcp` (7.2, the lane's tools over MCP with the kit's identity rules),
 `documind-chat` (12.8, the four brains of 8.7 behind one `/v1/chat`) and `documind-agent`
 (8.4, an A2A peer that knows DocuMind only through the MCP server - its image copies nothing
-from `shared/`). On lean the chat service runs with `CHECKPOINT_DSN=memory` and no IAP of its
-own: a backend the UI's brain radio and `make smoke-chat` call with ID tokens, and a
-conversation that dies with the instance, which the service says in its own log line. Their
-smoke tests are `make smoke-mcp`, `make smoke-chat` and `make smoke-agent`. The chat account
+from `shared/`). The chat service runs on the Cloud SQL checkpointer behind IAP, and stays a
+backend the UI's brain radio and `make smoke-chat` call with ID tokens (the bearer leg); a
+laptop can still set `CHECKPOINT_DSN=memory`, a conversation that dies with the instance, which
+the service says in its own log line. Their smoke tests are `make smoke-mcp`, `make smoke-chat` and `make smoke-agent`. The chat account
 sits on the three golden rosters like the UI's (a surface calls the API as itself and forwards
 the person's assertion when there is one); the eval gate's outsider is `documind-outsider-sa`,
 a fixture account that IAM admits and every roster refuses.
@@ -152,8 +157,8 @@ response format and parses the same `ModelDraft`; `GENERATOR_MODEL` then names a
 (`documind-general`, `documind-slm`, `documind-inference`), the usage row's `model_backend` finally means
 what it says and its cost comes from the gateway's `x-litellm-response-cost` header, and
 `tenant_settings/{tenant}` in Firestore pins one tenant to a backend without a redeploy. *The gateway is
-a route*: `make deploy-gateway` runs `services/litellm` on the lean lane with `config.lean.yaml` - no
-database, no master key, behind IAM - the PII guardrail with regexes that match, a token proxy that mints
+a route*: `make deploy-gateway` runs `services/litellm` with its one `config.yaml` (15 September 2026) -
+Postgres for the spend logs and tag budgets, no master key, behind IAM - the PII guardrail with regexes that match, a token proxy that mints
 an ID token per call for the GPU backends, and `ROUTER_ENFORCE=0` for shadow mode; `make smoke-gateway`
 proves the door, a JSON completion, the cost header, a PAN re-routed and the SLM route. *The GPU is a
 bill*: `make deploy-slm` stages 10.5's GGUF and its generated Modelfile (or `SLM_STOCK=gemma3:4b` as a
@@ -192,17 +197,17 @@ failed import logs `telemetry_not_instrumented` instead of an outage. *The relea
 revision and records its name in `deploy/.candidate-revision`, `make eval-live API=<its URL>` judges it,
 `make promote` moves traffic to that revision by name (never to "the latest": two candidates in flight would
 promote the wrong one - 12 September 2026), recording the one it moved traffic off in `deploy/.previous-revision`,
-and `make rollback` moves it back to exactly that one; `documind-cd.yml` gains a `profile` input whose lean jobs
-(`release-lean`, then `promote-lean` behind the `production` environment's reviewers) run exactly those targets
-with no Cloud Deploy verb, `wif.tf` pins the branch through `var.deploy_ref` (`DEPLOY_REF`, default
+and `make rollback` moves it back to exactly that one; `documind-cd.yml`'s `path` input picks the candidate jobs
+(`release-candidate`, then `promote` behind the `production` environment's reviewers), which run exactly those
+targets with no Cloud Deploy verb, or `release-clouddeploy` (staging, the live gate, a person, a canary), `wif.tf` pins the branch through `var.deploy_ref` (`DEPLOY_REF`, default
 `refs/heads/main`) and lets `sa-documind-cicd` mint the gate's two identities' tokens. *The smokes are one*:
 `make smoke-all` runs the seven smokes with their exports, tallies PASS/FAIL and exits non-zero when any smoke failed
 (12 September: a FAIL line satisfied the grep and the target exited 0), `smoke.py` refuses the golden
 question without a token as its fourth check, and `services/frontend/requirements.txt` no longer pins the two
 model clients nothing imports. *The rows are a tool*: `make usage HOURS=` (`evals/usage_rows.py`) groups the
 usage rows in Cloud Logging by tenant, model and backend, brain and surface with INR at `USD_INR=85`, and shows
-where the time went (p95 per stage: retrieve, rerank, generate, with the pool the reranker saw) - the lean
-profile's `tenant_daily`. *Ingestion has live cells*: `make ingest-one FILE= TENANT=` waits for the worker's
+where the time went (p95 per stage: retrieve, rerank, generate, with the pool the reranker saw) - the same
+figures `tenant_daily` holds, from the rows before the sink has copied them. *Ingestion has live cells*: `make ingest-one FILE= TENANT=` waits for the worker's
 `ingest_ok` line, `make poison` puts a zero-byte object in and waits for `ingest_poison`, `make dlq` peeks at
 `ingest-dlq-sub` without acking. `tools/check_contract.py` applies the lane rules to 12.1 to 12.8 and
 `tools/check_auth_wiring.py` pins every seam above.
@@ -255,8 +260,8 @@ front of the dense pool - off on the lane, `make candidate RETRIEVAL_GRAPH=auto`
 `MANAGED_MIRROR=rag_engine|vertex_search|both` copies every version the worker swaps current, as the text its rows
 hold, into the tenant's RAG Engine corpus (`make rag-engine-enable` once, `make rag-corpus TENANT=` per tenant)
 and / or Vertex AI Search data store (`managed.tf`, `MANAGED_SEARCH=true`), and takes a retired version out;
-`make managed-status` reads every store against the ledger. Off on the lean lane, on by default on the full profile
-(*Two profiles*, above). Which *tenants* are mirrored is each
+`make managed-status` reads every store against the ledger. On by default (*One shape*, above). Which *tenants* are
+mirrored is each
 tenant's `data_region` policy (13 September 2026, evening: `tenant_settings/{tenant}`, `make tenant-policy TENANT=
 DATA_REGION=in|any`, `shared/tenancy.py`; absent is `in`): `make roster` sets `acme` and `zeta` to `any` and
 `globex` to `in`, so one deployment shows both - a forbidden store is skipped once per tenant and said so, a
@@ -285,9 +290,9 @@ Run on a **disposable** project so nothing real is touched. Teardown is not tota
 Cloud Run services, the candidate tag and the context caches (`make down-services`) and then runs
 `terraform destroy`, but it cannot remove Firestore (delete protection), a bucket that holds objects
 (`force_destroy = false`), a tuned endpoint (`make tune`) or the BigQuery views (`make bq-views`) - it names
-them and `gcloud projects delete` is what removes them. On the full profile the audit bucket's retention
-policy is LOCKED (`storage.tf`, `is_locked = local.full`), which blocks even the project's deletion for five
-years, by design; the lean lab keeps the five-year term without the lock, so its project can go.
+them and `gcloud projects delete` is what removes them. With `AUDIT_LOCK=true` the audit bucket's retention
+policy is LOCKED (`storage.tf`, `is_locked = var.audit_lock`), which blocks even the project's deletion for five
+years, by design; a lab keeps the five-year term without the lock, so its project can go.
 
 ```bash
 # 0. one-time: a throwaway project + billing + the tf-state bucket
@@ -295,11 +300,11 @@ gcloud projects create documind-ai-live-0901 --set-as-default
 gcloud billing projects link documind-ai-live-0901 --billing-account=XXXXXX-XXXXXX-XXXXXX
 gsutil mb -l asia-south1 -b on gs://documind-tfstate && gsutil versioning set on gs://documind-tfstate
 
-# 1. THE DRY RUN — previews every resource, creates nothing (PROFILE=full for everything)
+# 1. THE DRY RUN — previews every resource, creates nothing
 cd deploy && make plan PROJECT=documind-ai-live-0901 ADMIN_EMAILS=you@example.com
 
 # 2. bring it up: terraform apply, a first cookie-secret version, Cloud Build for every image
-#    this profile deploys, the deploy scripts (IAP on the UI, one accessor per ADMIN_EMAILS),
+#    make up deploys, the deploy scripts (IAP on the UI, one accessor per ADMIN_EMAILS),
 #    the vector indexes READY, ADMIN_EMAILS on TENANT's roster and the UI's service account
 #    on the three golden tenants'. Re-run it any time; it is idempotent.
 make up PROJECT=documind-ai-live-0901 ADMIN_EMAILS=you@example.com

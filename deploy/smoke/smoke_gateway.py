@@ -15,7 +15,7 @@ Checks:
     5. documind-slm  -> an answer, from the SLM or from its named fallback (the response's model says which),
        and the cost header the API prices from
 
-Identity: an ID token for the gateway's own URL, minted as DOCUMIND_IMPERSONATE_SA. No master key on the lean lane.
+Identity: an ID token for the gateway's own URL, minted as DOCUMIND_IMPERSONATE_SA. No master key: Cloud Run IAM is the door.
 """
 from __future__ import annotations
 

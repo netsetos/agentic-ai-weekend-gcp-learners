@@ -1,8 +1,8 @@
 """The spend fraction the breaker reads, and the counter that feeds it. Module 10 (10.3), hand-written.
 
 breakers.py has said since 12.6 what the service does at 80% and 100% of budget, and read a spend it
-had no source for. On the full profile that source is tenant_daily; on the lean one there is no
-BigQuery, so the API keeps the month's total itself: one Firestore document per month, incremented
+had no source for. tenant_daily (the BigQuery view over the log sink) answers it a day late, so the API
+keeps the month's total itself: one Firestore document per month, incremented
 by the cost of every answer it logs (main.py), read by choose_model_for() before it picks a tier.
 SPEND_PCT overrides the reading - the replay: "what does the lane do at 85%?" without spending it.
 """

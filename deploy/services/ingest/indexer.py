@@ -143,7 +143,7 @@ def upsert(index_name: str, datapoints: list[IndexDatapoint]) -> None:
 
 
 def remove_datapoints(index_name: str, ids: list[str]) -> None:
-    """The full profile's half of retiring a version: the old ids leave the ANN tier (permanent there - the
+    """The ANN tier's half of retiring a version: the old ids leave it (permanent there - the
     Firestore rows keep the flag and the history, and reupsert() below is how the undo puts them back)."""
     if not ids:
         return
@@ -155,9 +155,9 @@ def remove_datapoints(index_name: str, ids: list[str]) -> None:
 
 def reupsert(index_name: str, db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: str,
              chunks_collection: str = "chunks") -> int:
-    """The undo's half on the full profile (12 September 2026). remove_datapoints() took the retired ids out of the
+    """The undo's half in the ANN tier (12 September 2026). remove_datapoints() took the retired ids out of the
     ANN tier for good, so an undo that only flipped its Firestore rows left the version current in Firestore and
-    absent from Vector Search - retrievable on the lean profile, invisible on the full one. The rows kept their
+    absent from Vector Search - retrievable through the Firestore rung, invisible through the endpoint. The rows kept their
     vectors (the `embedding` field is the chaos fallback's), so the current rows of the reactivated version go back
     up from there, with the same four restricts to_datapoints() writes, and nothing is embedded. Returns the
     datapoints upserted; the worker calls it BEFORE it retires the newer version, so the tier never holds none."""

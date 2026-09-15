@@ -10,14 +10,17 @@ notebook's heredoc and let the extractor own it — not write a second copy besi
 
 Last reviewed: 2026-09-05 (twice: adoption, then an adversarial audit of the adoption).
 
-## Lean profile, 2026-09-06
+## One shape, 2026-09-15 (the lean profile, 2026-09-06, superseded)
 
-`terraform/gke.tf` and `terraform/spanner.tf` stay unowned and are now gated like the other
-full-profile files (`count = local.full ? 1 : 0`, `variables.tf`'s `profile`). The lean
-profile's own pieces are all owned: `variables.tf` and `storage.tf` (12.1), `eventarc.tf`,
-the worker's `parser.py` / `contracts.py` / `main.py` and the `documind-ingest` deploy
-command (12.5), `config.py` / `retriever.py` (12.2), `tenancy.py`'s write side (12.8),
-`run_eval.py`'s outsider token (12.7). The `Makefile` is hand-written, as before.
+The lean | full profile switch is gone: every resource the full profile used to gate behind
+`count = local.full ? 1 : 0` is declared unconditionally, and `variables.tf` carries `audit_lock`
+and `gemini_quota_override` in its place. `terraform/gke.tf`, `terraform/spanner.tf`,
+`terraform/gateway.tf` and `terraform/off.tf` stay unowned (the cluster is Terraform's now; the
+night job no longer deletes it). The pieces the lane ran live are all owned: `variables.tf` and
+`storage.tf` (12.1), `eventarc.tf`, the worker's `parser.py` / `contracts.py` / `main.py` and the
+`documind-ingest` deploy command (12.5), `config.py` / `retriever.py` (12.2), `tenancy.py`'s
+write side (12.8), `run_eval.py`'s outsider token (12.7). The `Makefile` is hand-written, as
+before; `services/litellm/config.lean.yaml` was folded into the one `config.yaml`.
 
 ## Adopted since the last review
 

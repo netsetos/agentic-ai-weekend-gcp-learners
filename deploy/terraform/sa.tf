@@ -224,7 +224,7 @@ locals {
     "roles/datastore.viewer", # the roster (tenancy), the ingest claims and chunk counts - reads only
     "roles/logging.logWriter",
     "roles/cloudtrace.agent",
-    "roles/storage.objectCreator", # audit rows, when AUDIT_BUCKET is set (full profile)
+    "roles/storage.objectCreator", # audit rows, when AUDIT_BUCKET is set
   ]
 
   # Nothing at project scope (12 September 2026). "May knock on every service" was the one role

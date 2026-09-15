@@ -9,10 +9,10 @@ Lesson ids ending in `p` are practice labs.
 |---|---|---|
 | A owned: extracted verbatim from a notebook heredoc | 91 | 0 |
 | B pasted: a block carried verbatim by notebooks | 2 | 0 |
-| C used: imported, read, run or excerpted by notebook code | 75 | 25 |
+| C used: imported, read, run or excerpted by notebook code | 74 | 25 |
 | D prose: named in a notebook's text only | 0 | 0 |
 | E unreferenced by any notebook | 0 | 42 |
-| total | 168 | 67 |
+| total | 167 | 67 |
 
 ## A. owned: extracted verbatim from a notebook heredoc (91)
 
@@ -117,14 +117,14 @@ Lesson ids ending in `p` are practice labs.
 | `shared/documind_corpus.py` | code | - | 2.3,4.2,4.2p,4.5,4.5p |
 | `shared/documind_graph.py` | code | - | 4.6 |
 
-## C. used: imported, read, run or excerpted by notebook code (100)
+## C. used: imported, read, run or excerpted by notebook code (99)
 
 | File | Kind | Owner | Shown by |
 |---|---|---|---|
 | `../.github/workflows/documind-dryrun.yml` | code | - | 12.7 |
 | `INDEXING.md` | code | - | 12.1,12.2,12.3,12.5,12.7,13.1 |
 | `Makefile` | code | - | 11.1,11.4,11.5,12.1,12.3,12.5,12.7,12.8,13.2,4.8,7.1,7.2,8.4 |
-| `README.md` | data | - | 12.2,12.7 |
+| `README.md` | data | - | 12.7 |
 | `UNOWNED.md` | data | - | 12.7,12.8 |
 | `evals/README.md` | data | - | 12.7 |
 | `evals/ablate.py` | code | - | 12.2,12.3,4.8 |
@@ -179,8 +179,7 @@ Lesson ids ending in `p` are practice labs.
 | `services/gemma-vllm/streaming.py` | code | - | 11.1p,11.2,11.2p,12.1,12.2,12.4p,12.4,12.5,5.5,6.4,8.4,8.4p |
 | `services/ingest/reconcile.py` | code | - | 12.2,12.3,12.5 |
 | `services/litellm/Dockerfile` | code | - | 11.3,12.7 |
-| `services/litellm/config.lean.yaml` | code | - | 11.3 |
-| `services/litellm/config.yaml` | code | - | 12.6 |
+| `services/litellm/config.yaml` | code | - | 11.3,12.6 |
 | `services/litellm/dlp_audit.py` | code | - | 11.3,11.3p |
 | `services/litellm/documind_classifier.py` | code | - | 11.3,11.3p |
 | `services/litellm/documind_router.py` | code | - | 11.3,11.3p |
@@ -204,7 +203,7 @@ Lesson ids ending in `p` are practice labs.
 | `shared/documind_tools.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,11.1,11.2,11.3,11.4,11.5,12.1,12.2,12.3,12.4,12.5,12.6,12.7,12.8,6.4,7.1,8.1,8.2,8.5,8.6,8.7,9.1,9.2,9.3,9.4,9.5,9.6 |
 | `shared/local_corpus.py` | code | - | 7.1 |
 | `shared/pii.py` | code | - | 10.1,10.5,12.3,12.5,12.6,12.8,5.5,9.6 |
-| `shared/profile.py` | code | - | 10.3,12.1,12.2,12.3,12.4,12.5,12.6,12.7,12.8,13.1,13.4,13.5,3.2p,4.8,6.4,7.1,7.2,8.5,8.6,9.4 |
+| `shared/profile.py` | code | - | 10.3,11.3,12.1,12.3,12.4,12.7,12.8,3.2p,6.4,7.1,8.5,9.4 |
 | `shared/requirements.txt` | code | - | 12.7 |
 | `smoke/preflight.sh` | code | - | 12.8 |
 | `smoke/smoke.py` | code | - | 12.1,12.2,12.3,12.7,12.8,4.8,7.1,7.2,8.4 |
@@ -215,11 +214,11 @@ Lesson ids ending in `p` are practice labs.
 | `smoke/smoke_media.py` | code | - | 12.8 |
 | `smoke/smoke_reindex.py` | code | - | 12.8 |
 | `smoke/smoke_slm.py` | code | - | 12.8 |
-| `terraform/gateway.tf` | code | - | 10.6,11.1,11.2,11.3,11.3p,11.4,11.5,12.1,12.2,12.3,12.4p,12.4,12.5,12.6,12.7,12.8,13.3 |
+| `terraform/gateway.tf` | code | - | 10.6,11.1,11.2,11.3,11.3p,11.4,11.5,12.1,12.2,12.3,12.4p,12.4,12.5,12.6,12.7,12.8,13.3,7.2 |
 | `terraform/gke.tf` | code | - | 11.5,12.1 |
 | `terraform/off.tf` | code | - | 12.1,12.3,12.8 |
 | `terraform/reconcile.tf` | code | - | 12.5 |
-| `terraform/spanner.tf` | code | - | 4.6 |
+| `terraform/spanner.tf` | code | - | 12.1,4.6 |
 | `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.2p,4.5,4.6,4.7 |
 
 ## E. unreferenced by any notebook (42)

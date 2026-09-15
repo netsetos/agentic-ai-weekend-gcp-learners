@@ -54,15 +54,14 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    ever swaps leaves by policy). No reader can see them.
 6. **Swap.** `swap_versions()` flips the new rows current (clearing the stage marks), then retires every other
    current row of the source: `current=false`, `superseded_by`, `superseded_at`, `expire_at = now + RETENTION_DAYS`,
-   `effective_to` when the successor declares a date. On the full profile the ANN tier follows: the new datapoints
+   `effective_to` when the successor declares a date. The ANN tier follows: the new datapoints
    go up after the swap, the retired ids come out. Then the **managed mirror** (P9.2, 13 September 2026), when
    `MANAGED_MIRROR` names a store: the version's text - the same text these rows hold - goes to the tenant's RAG
    Engine corpus (4.3) and / or Vertex AI Search data store (4.4) as one document named by its `doc_key`, and the
    versions the swap retired leave them; `mirror_ok` per store, `mirror_failed` on an error (the ingest is not
    failed - the walk repairs the mirror), `mirror_no_store` once for a tenant without one, `mirror_skipped` for a
-   media version, which stays here (`services/ingest/managed.py`). Off on the lean lane, on by default on the full
-   profile (`make up PROFILE=full` declares the data stores, creates the corpora and pins acme and zeta to the two
-   backends). Which *tenants* it copies is not
+   media version, which stays here (`services/ingest/managed.py`). On by default (`make up` declares the data
+   stores, creates the corpora and pins acme and zeta to the two backends). Which *tenants* it copies is not
    the deployment's to say (13 September 2026, evening): `tenant_settings/{tenant}.data_region` is - `in` keeps the
    text on these rows, `any` lets a store outside India hold a copy, absent is `in` (`shared/tenancy.py`,
    `make tenant-policy TENANT= DATA_REGION=`). A forbidden store is `mirror_policy_skipped` once per tenant and
@@ -75,7 +74,7 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    against `RETENTION_DAYS`. A shortfall or a closed window is `reactivate_incomplete` (both numbers on the line),
    nothing is flipped, and the worker takes the claim back and ingests the bytes as a fresh version (step 3 on;
    the carry-over reuses what the newer version still holds). Otherwise the rows come back with their stamps
-   cleared, on the full profile their ids go back up from the rows' own vectors (`reupsert`) *before* the newer
+   cleared, their ids go back up into the ANN tier from the rows' own vectors (`reupsert`) *before* the newer
    version is retired in turn, and nothing is embedded (`ingest_reactivated`); the managed mirror follows the undo
    - the reactivated version's text read off its own rows, the newer version deleted (`after_undo`). The first
    undo flipped whatever
@@ -151,7 +150,7 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
 | Bring a withdrawn document back | `make restore SOURCE=` | `reconcile_restored`, then `ingest_reactivated` inside the undo window or `ingest_ok` after it; refused with the reason when the source is not withdrawn or its object is gone |
 | A document over 250 pages | nothing - it is queued and the batch job indexes it (`make batch` to run the job now, `make queued` to see the queue; `make batch-job` once, to declare it) | `ingest_queued_batch` with the consumer named, then the job's `ingest_ok` with `lane=batch` and the record in `ingest_batch/` (`indexed`, or `failed` with the reason); the plan's `queued` line until then, not drift |
 | Where a tenant's text may be held | `make tenant-policy TENANT= DATA_REGION=in\|any` (without `DATA_REGION` it prints the current policy; `make roster` set the demo's three) | `data_region=` on the tenant's `tenant_settings` row; from the next swap the mirror obeys it (`mirror_policy_skipped` for a store it forbids, `doc.mirror` for every copy it permits) and the API holds a managed backend against it (`policy_fallback=1` on the row) |
-| Which store answers a tenant | `make tenant-backend TENANT= RETRIEVAL_BACKEND=vector\|firestore\|rag_engine\|vertex_search\|default` (full's `make up` pins acme to the corpus and zeta to the data store) | `retrieval_backend=` on the tenant's row; from the next question the API serves from it - unless the tenant's `data_region` is `in`, when the row says `policy_fallback=1` and the kit's index answered |
+| Which store answers a tenant | `make tenant-backend TENANT= RETRIEVAL_BACKEND=vector\|firestore\|rag_engine\|vertex_search\|default` (`make up` pins acme to the corpus and zeta to the data store) | `retrieval_backend=` on the tenant's row; from the next question the API serves from it - unless the tenant's `data_region` is `in`, when the row says `policy_fallback=1` and the kit's index answered |
 | The graph after a reindex | `make graph TENANT=` | `graph_built` with nodes and edges; only chunks whose `chunk_hash` changed are re-extracted (`graph_extractions/`), the rest is cached |
 | Many documents changed | `make ingest-corpus`, `make reconcile APPLY=1` | per-source counts; `reconcile_done` with `drift` 0 the night after |
 | Which version is live? | `make sources TENANT_ONLY=acme`, the UI's Documents page, `GET /v1/sources?tenant_id=` | every source's version, generation, counts, dates, the fingerprint |
@@ -200,7 +199,7 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
   `chunk_ids` pointing at retired rows until the next `make graph`; the retriever drops those the way it drops every
   retired chunk (`prefer_current`, the `current` check), so a stale graph loses coverage, never correctness.
 - Not yet (the strategy's P2): `make reembed EMBEDDING_VERSION=` (a full re-embed into new rows behind a
-  candidate), an index per embedding version on the full profile, an as-of filter on `effective_to`.
+  candidate), an index per embedding version, an as-of filter on `effective_to`.
 
 ## 9. How another team follows this
 

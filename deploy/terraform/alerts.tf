@@ -357,7 +357,7 @@ resource "google_monitoring_alert_policy" "reconcile_failed" {
   }
 }
 
-# The e-mail channel. PagerDuty is the full profile's on-call; on the lane the admins' addresses are the on-call
+# The e-mail channel. PagerDuty is the on-call when pagerduty_key is set; the admins' addresses are the on-call otherwise
 # (make up passes ALERT_EMAILS, derived from ADMIN_EMAILS unless that is still the placeholder), and every policy
 # in this file notifies both channels when both exist.
 variable "alert_emails" {

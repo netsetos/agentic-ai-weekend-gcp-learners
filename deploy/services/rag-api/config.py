@@ -9,8 +9,8 @@ GRAPH_MODES = ("off", "on", "auto")          # 4.6's graph on the lane (13 Septe
 
 def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
     """RETRIEVAL_MODE against RETRIEVAL_BACKEND, at startup (12 September 2026, R06). Hybrid is Vector Search's
-    HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so on the lean
-    profile RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
+    HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so with the
+    Firestore backend RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
     what its environment says must not start: the message names the fix, so it is read on the failed deploy and not
     found in the rows a week later. An unknown value is refused for the same reason - a typo ran dense too.
 
@@ -27,9 +27,9 @@ def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
         raise ValueError(f"RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: {backend} embeds and searches on its own "
                          "terms (a managed store has no sparse leg to fuse). Set RETRIEVAL_MODE=dense.")
     if backend == "firestore" and mode == "hybrid":
-        raise ValueError("RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: the Firestore backend (the lean profile) "
-                         "is dense-only. Set RETRIEVAL_MODE=dense, or deploy the full profile with a Vector Search "
-                         "endpoint and keep hybrid.")
+        raise ValueError("RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: the Firestore backend is dense-only. "
+                         "Set RETRIEVAL_MODE=dense, or RETRIEVAL_BACKEND=vector with the Vector Search endpoint "
+                         "vector.tf declares and keep hybrid.")
 
 
 class Settings(BaseSettings):
@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     region: str = "us-central1"
     india_region: str = "asia-south1"
     # Which store answers the vector query. `vector` is Vector Search with the Firestore
-    # fallback beneath it (the chaos rung). `firestore` - the kit's lean profile - is
+    # fallback beneath it (the chaos rung). `firestore` - the rung on its own - is
     # Firestore's own vector index alone: no endpoint to keep warm, the same tenant
     # pre-filter, the ANN tier left out. Nothing else in the service changes.
     retrieval_backend: str = Field("vector", alias="RETRIEVAL_BACKEND")   # vector | firestore | rag_engine | vertex_search (P9.4, R4): the DEFAULT

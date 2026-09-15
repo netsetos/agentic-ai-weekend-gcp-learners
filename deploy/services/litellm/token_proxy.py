@@ -1,7 +1,7 @@
 """The gateway's local door to Cloud Run backends that want a Google ID token per call. Module 11 (11.3, 11.4).
 
 LiteLLM reads litellm_params.api_key once, at startup, from the environment. A Cloud Run ID token lives an hour. So
-config.lean.yaml points the self-hosted routes at http://127.0.0.1:8090/slm (and /vllm), and this process - started
+config.yaml points the self-hosted routes at http://127.0.0.1:8090/slm (and /vllm), and this process - started
 beside litellm by entrypoint.sh - forwards every request to the real service with a token it mints and refreshes
 itself (gcp_id_token.py, per audience). The token is never an environment variable and never pasted. Streams pass
 through untouched, so Ollama's and vLLM's SSE reach LiteLLM as they were sent.

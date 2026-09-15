@@ -40,7 +40,7 @@ Six things here are load-bearing and easy to get wrong:
    crash at startup. The usage row names the brain, and rag-api's row does too.
 
 Verified 2026-09-04 against langchain 1.4.0 / langchain-google-genai 4.4.0. The bearer leg (SELF_URL)
-arrived with Module 8 on the lane, 2026-09-08: it is what lets the chat service run on the lean profile
+arrived with Module 8 on the lane, 2026-09-08: it is what lets the chat service be called as a backend
 and be smoke-tested from a shell, and it changes nothing for a person behind IAP.
 """
 from __future__ import annotations

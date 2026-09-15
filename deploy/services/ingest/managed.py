@@ -130,7 +130,7 @@ class RagEngineStore:
 
     def delete_corpus(self, tenant_id: str) -> str | None:
         """The tenant's corpus and every file in it, by display name; None when there is none. The one call that
-        stops a corpus billing storage (make managed-stores-down on the full profile, make down's note on lean)."""
+        stops a corpus billing storage (make managed-stores-down, which make down runs first)."""
         rag = self.rag()
         want = store_id(tenant_id)
         name = next((c.name for c in rag.list_corpora() if c.display_name == want), None)

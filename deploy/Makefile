@@ -9,7 +9,7 @@
 #     make plan  PROJECT=documind-ai-live-0910     terraform dry run (creates nothing)
 #     make up    PROJECT=...                        apply, build + deploy the services, seed the roster
 #     make tenant-policy TENANT= DATA_REGION=in|any   where a tenant's text may be held (13 September 2026): in = the kit's rows only; any = the managed stores too
-#     make tenant-backend TENANT= RETRIEVAL_BACKEND=  which store answers one tenant (vector | firestore | rag_engine | vertex_search | default); full's make up pins acme and zeta
+#     make tenant-backend TENANT= RETRIEVAL_BACKEND=  which store answers one tenant (vector | firestore | rag_engine | vertex_search | default); make up pins acme and zeta
 #     make media [MEDIA_ARGS=--video]              the corpus's figures (and the town hall video) under evals/corpus/
 #     make ingest-corpus PROJECT=...                the corpus into the uploads bucket, one prefix per tenant
 #     make smoke DOCUMIND_API_URL=https://...       end-to-end smoke test
@@ -25,12 +25,11 @@
 #     make rag-engine-enable                     once per project: RAG Engine in serverless mode + vectorsearch (4.3's one-time prep)
 #     make down  PROJECT=...                        the services, then terraform destroy; names what only project deletion removes
 #
-# PROFILE=lean (the default) is the Module 4 lane: the API, the UI and the ingest worker on
-# Cloud Run, Firestore with its vector indexes, one Document AI processor, the uploads bucket -
-# plus, since Modules 7 and 8 joined it, the MCP server, the chat service on an in-memory
-# checkpointer (no Cloud SQL) and the A2A peer, all scale-to-zero. PROFILE=full adds what Module 12 teaches - Vector Search, the Spanner
-# Graph trial, the Cloud SQL checkpointer, GKE, the BigQuery mirror and Dataplex scan, the
-# log sink, Cloud Deploy - and the admin and chat services. See README.md.
+# ONE SHAPE (15 September 2026; the lean | full switch is gone): seven Cloud Run services - the ingest worker, the
+# API, the admin console, the UI, the chat service on its Cloud SQL checkpointer, the MCP server and the A2A peer -
+# Firestore with its vector indexes, Vector Search and its endpoint, the Spanner Graph trial, the Autopilot cluster,
+# the BigQuery mirror and Dataplex scan, the log sink, Cloud Deploy, the managed stores of 4.3 and 4.4, one Document
+# AI processor, the buckets, the accounts, secrets, budget and alerts. See README.md.
 #
 # On Windows without `make`, run the python commands directly, e.g.
 #     python deploy/validate.py
@@ -50,13 +49,16 @@ PLANFILE = tfplan.dryrun
 # Data at rest (Firestore, the buckets, Model Armor) follows variables.tf's india_region.
 #
 # No comment on the same line as a value: Make keeps the blanks before a `#` as part of the
-# value, so `PROFILE ?= lean   # ...` made $(SERVICES_$(PROFILE)) name a variable that does not
-# exist, and `make up` built and deployed nothing without a word - the first live run.
+# value, so a `?=` with a trailing comment once made the services list name a variable that did
+# not exist, and `make up` built and deployed nothing without a word - the first live run.
 REGION        ?= us-central1
-# lean | full
-PROFILE       ?= lean
 # us: Layout Parser in the US | india: Enterprise OCR in Mumbai
 RESIDENCY     ?= us
+# The two production knobs that replaced the profile (variables.tf, 15 September 2026): lock the audit bucket's
+# five-year retention (irreversible; it liens the project) and apply quota.tf's Gemini override (its metric names
+# are unverified; an unknown one fails the apply). Both false for a lab, both true on purpose.
+AUDIT_LOCK            ?= false
+GEMINI_QUOTA_OVERRIDE ?= false
 # the UI's floor: 1 on a session day, 0 after
 MIN_INSTANCES ?= 0
 # comma-separated: IAP accessors, the admin allowlist
@@ -86,10 +88,9 @@ TUNE_EPOCHS     ?= 3
 TUNE_ADAPTER    ?= 4
 # Module 11: THE BACKEND IS A SETTING. vertex = google.genai (the lane); gateway = 11.3's LiteLLM gateway, where
 # GENERATOR_MODEL names a route (documind-slm is 11.4's self-hosted model). SLM_STOCK names a stock model to serve as the
-# stand-in until 10.5's GGUF is in the bucket; GATEWAY_CONFIG picks the profile's LiteLLM config.
+# stand-in until 10.5's GGUF is in the bucket.
 MODEL_BACKEND   ?= vertex
 SLM_STOCK       ?=
-GATEWAY_CONFIG  ?= config.lean.yaml
 ROUTER_ENFORCE  ?= 1
 # Module 12: the guard is a switch (12.6) and the pipeline's ref is a variable (12.7)
 ARMOR           ?= off
@@ -108,18 +109,13 @@ RETRIEVAL_GRAPH ?= off
 # vertex_search backends. MANAGED_MIRROR is the worker's, the batch job's and the walk's switch (off | rag_engine |
 # vertex_search | both) - the deployment's capability list; which TENANTS may be mirrored is each tenant's data_region
 # (make tenant-policy, 13 September 2026 evening). MANAGED_SEARCH=true declares the data stores (managed.tf);
-# RAG_LOCATION is the corpora's region (serverless: us-central1 only). Off on the lean lane; ON on the full profile
-# (13 September 2026, evening): both stores, the corpora created by make up (managed-stores), acme pinned to
-# rag_engine and zeta to vertex_search - every managed piece the course teaches runs there, and a candidate is
-# still how a backend is judged before it becomes a deployment's default.
-ifeq ($(PROFILE),full)
+# RAG_LOCATION is the corpora's region (serverless: us-central1 only). Both ON (13 September 2026, evening; the one
+# shape since 15 September): both stores, the corpora created by make up (managed-stores), acme pinned to rag_engine
+# and zeta to vertex_search - every managed piece the course teaches runs, and a candidate is still how a backend is
+# judged before it becomes a deployment's default.
 MANAGED_MIRROR  ?= both
 MANAGED_SEARCH  ?= true
-else
-MANAGED_MIRROR  ?= off
-MANAGED_SEARCH  ?= false
-endif
-# the tenants whose data_region is `any` (make roster): a RAG Engine corpus each on the full profile, the pins,
+# the tenants whose data_region is `any` (make roster): a RAG Engine corpus each, the pins,
 # and managed.tf's `tenants` default (the data stores declared) names the same two - globex's text stays home
 MANAGED_TENANTS ?= acme zeta
 RAG_LOCATION    ?= us-central1
@@ -154,7 +150,8 @@ TFSTATE_PREFIX     ?= documind/$(PROJECT)
 
 TF_VARS = -var project_id=$(PROJECT) \
           -var region=$(REGION) \
-          -var profile=$(PROFILE) \
+          -var audit_lock=$(AUDIT_LOCK) \
+          -var gemini_quota_override=$(GEMINI_QUOTA_OVERRIDE) \
           -var residency=$(RESIDENCY) \
           -var budget_amount=$(BUDGET_AMOUNT) \
           -var pagerduty_key=$(PAGERDUTY_KEY) \
@@ -174,18 +171,16 @@ TF_INIT = terraform init -input=false -reconfigure \
           -backend-config="bucket=$(TFSTATE_BUCKET)" \
           -backend-config="prefix=$(TFSTATE_PREFIX)"
 
-# The services each profile builds and deploys, in the order they must come up: the worker
-# first (the push subscription already points at its URL), then the API, then the surfaces
-# that call it. The flags live in commands/lesson-12.*.sh, extracted from the notebooks, so
-# the thing that runs is the thing the lesson taught and there is no second copy to drift.
-IMAGE_REPO    = $(REGION)-docker.pkg.dev/$(PROJECT)/documind
-SERVICES_lean = ingest api ui mcp chat agent
-SERVICES_full = ingest api admin ui chat mcp agent
-SCRIPTS_lean  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-12.4.sh \
-                commands/lesson-7.2.sh commands/lesson-12.8.sh commands/lesson-8.4.sh
-SCRIPTS_full  = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-12.3.sh \
-                commands/lesson-12.4.sh commands/lesson-12.8.sh \
-                commands/lesson-7.2.sh commands/lesson-8.4.sh
+# The services make up builds and deploys, in the order they must come up: the worker first (the push
+# subscription already points at its URL), then the API, then the surfaces that call it. The flags live in
+# commands/lesson-12.*.sh, extracted from the notebooks, so the thing that runs is the thing the lesson taught
+# and there is no second copy to drift. One of them again: make build deploy-services SERVICES=api
+# SCRIPTS=commands/lesson-12.2.sh.
+IMAGE_REPO = $(REGION)-docker.pkg.dev/$(PROJECT)/documind
+SERVICES   = ingest api admin ui chat mcp agent
+SCRIPTS    = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-12.3.sh \
+             commands/lesson-12.4.sh commands/lesson-12.8.sh \
+             commands/lesson-7.2.sh commands/lesson-8.4.sh
 
 .PHONY: dryrun extract check validate eval eval-live plan up secrets build deploy-services \
         wait-index roster ingest-corpus smoke down guard-project bq-views features make-evalset \
@@ -264,8 +259,7 @@ adopt-firestore: guard-project
 up: guard-project extract adopt-firestore
 	cd $(TF_DIR) && $(TF_INIT) && \
 	  terraform apply -input=false -auto-approve $(TF_VARS)
-	$(MAKE) drift secrets build deploy-services wait-index roster
-	@if [ "$(PROFILE)" = full ]; then $(MAKE) managed-stores && $(MAKE) bq-views; fi
+	$(MAKE) drift secrets build deploy-services wait-index roster managed-stores bq-views
 
 # After an apply, a plan should be EMPTY. A resource that is still "to be replaced" is one the
 # provider reads back differently from how it was written - which is how both vector indexes
@@ -289,12 +283,12 @@ secrets: guard-project
 	    | gcloud secrets versions add cookie-secret --project=$(PROJECT) --data-file=-; \
 	else echo ">> cookie-secret: has a version"; fi
 
-# Cloud Build every image this profile deploys. api, ingest, admin and chat import shared/, so
+# Cloud Build every image make up deploys. api, ingest, admin and chat import shared/, so
 # they build from the deploy/ context through cloudbuild.yaml with the Dockerfile named; the
 # UI is self-contained and builds from its own directory.
 build: guard-project
-	@[ -n "$(SERVICES_$(PROFILE))" ] || (echo "ERROR: PROFILE='$(PROFILE)' names no services (lean | full)"; exit 1)
-	@set -e; for svc in $(SERVICES_$(PROFILE)); do \
+	@[ -n "$(SERVICES)" ] || (echo "ERROR: SERVICES names no service"; exit 1)
+	@set -e; for svc in $(SERVICES); do \
 	  case $$svc in api) dir=rag-api ;; ui) dir=frontend ;; *) dir=$$svc ;; esac; \
 	  echo ">> building $(IMAGE_REPO)/$$svc:$(GIT_SHA) from services/$$dir"; \
 	  if [ "$$svc" = ui ]; then \
@@ -307,15 +301,15 @@ build: guard-project
 	done
 
 # The deploy scripts read their inputs from the environment: the project number for the
-# deterministic run.app URLs and the IAP audiences, the processor terraform created, and -
-# in the full profile - the Vector Search names. In the lean profile RETRIEVAL_BACKEND is
-# firestore and the vector variables are empty on purpose.
+# deterministic run.app URLs and the IAP audiences, the processor terraform created, the
+# Vector Search names from the state, and RETRIEVAL_BACKEND=vector as the deployment's default
+# (a tenant's own pin and its data_region still decide per request - make tenant-backend).
 # After the API's DEPLOY block, traffic goes to the revision that block just created, explicitly: make candidate's
 # --no-traffic pins the service to a named revision, and Cloud Run then leaves every later deploy at 0% - the routing
 # flip on 10 September ran on the old revision for an hour before anyone read status.traffic (F44). By NAME, read
 # from status.latestCreatedRevisionName, never "the latest revision" (12 September 2026): the flip names what it moved to.
 deploy-services: guard-project
-	@[ -n "$(SCRIPTS_$(PROFILE))" ] || (echo "ERROR: PROFILE='$(PROFILE)' names no deploy scripts (lean | full)"; exit 1)
+	@[ -n "$(SCRIPTS)" ] || (echo "ERROR: SCRIPTS names no deploy script"; exit 1)
 	@set -e; \
 	PROJECT_NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	DOCAI_PROCESSOR_ID=$$(cd $(TF_DIR) && terraform output -raw docai_processor_id); \
@@ -323,23 +317,17 @@ deploy-services: guard-project
 	RETENTION_DAYS=$$(cd $(TF_DIR) && terraform output -raw retention_days 2>/dev/null || echo $(RETENTION_DAYS)); \
 	EMBEDDING_MODEL=$$(cd $(TF_DIR) && terraform output -raw embedding_model 2>/dev/null || echo $(EMBEDDING_MODEL)); \
 	EMBEDDING_VERSION=$$(cd $(TF_DIR) && terraform output -raw embedding_version 2>/dev/null || echo $(EMBEDDING_VERSION)); \
-	if [ "$(PROFILE)" = full ]; then \
-	  RETRIEVAL_BACKEND=vector; \
-	  VECTOR_INDEX_ENDPOINT=$$(cd $(TF_DIR) && terraform output -raw vector_index_endpoint); \
-	  VECTOR_DEPLOYED_INDEX_ID=$$(cd $(TF_DIR) && terraform output -raw vector_deployed_index_id); \
-	  VECTOR_INDEX_NAME=$$(cd $(TF_DIR) && terraform output -raw vector_index_name); \
-	  BQ_CHUNK_TABLE=$(PROJECT).rag_data.chunk_source; \
-	  CHAT_SQL_FLAGS="--add-cloudsql-instances=$(PROJECT):$(REGION):documind-checkpoint --set-secrets=CHECKPOINT_DSN=documind-checkpoint-dsn:latest"; \
-	  CHAT_EXTRA_ENV=; \
-	else \
-	  RETRIEVAL_BACKEND=firestore; VECTOR_INDEX_ENDPOINT=; VECTOR_DEPLOYED_INDEX_ID=; \
-	  VECTOR_INDEX_NAME=; BQ_CHUNK_TABLE=; \
-	  CHAT_SQL_FLAGS=; CHAT_EXTRA_ENV='|CHECKPOINT_DSN=memory'; \
-	fi; \
+	RETRIEVAL_BACKEND=vector; \
+	VECTOR_INDEX_ENDPOINT=$$(cd $(TF_DIR) && terraform output -raw vector_index_endpoint); \
+	VECTOR_DEPLOYED_INDEX_ID=$$(cd $(TF_DIR) && terraform output -raw vector_deployed_index_id); \
+	VECTOR_INDEX_NAME=$$(cd $(TF_DIR) && terraform output -raw vector_index_name); \
+	BQ_CHUNK_TABLE=$(PROJECT).rag_data.chunk_source; \
+	CHAT_SQL_FLAGS="--add-cloudsql-instances=$(PROJECT):$(REGION):documind-checkpoint --set-secrets=CHECKPOINT_DSN=documind-checkpoint-dsn:latest"; \
+	CHAT_EXTRA_ENV=; \
 	CHAT_URL=https://documind-chat-$$PROJECT_NUMBER.$(REGION).run.app; \
-	for f in $(SCRIPTS_$(PROFILE)); do \
+	for f in $(SCRIPTS); do \
 	  echo ">> $$f (DEPLOY block)"; \
-	  PROJECT=$(PROJECT) GIT_SHA=$(GIT_SHA) REGION=$(REGION) PROFILE=$(PROFILE) \
+	  PROJECT=$(PROJECT) GIT_SHA=$(GIT_SHA) REGION=$(REGION) \
 	  RESIDENCY=$(RESIDENCY) MIN_INSTANCES=$(MIN_INSTANCES) ADMIN_EMAILS=$(ADMIN_EMAILS) \
 	  ADMIN_DOMAINS=$(ADMIN_DOMAINS) PROJECT_NUMBER=$$PROJECT_NUMBER \
 	  DOCAI_PROCESSOR_ID=$$DOCAI_PROCESSOR_ID DOCAI_LOCATION=$$DOCAI_LOCATION \
@@ -355,7 +343,7 @@ deploy-services: guard-project
 	  BUDGET_USD=$(BUDGET_USD) SPEND_PCT=$(SPEND_PCT) \
 	  sh -ec "$$(sed -n '/^# ---- DEPLOY ----/,/^# ---- [A-Z_]* ----$$/p' $$f | grep -v '^# ----')"; \
 	done
-	@if echo "$(SCRIPTS_$(PROFILE))" | grep -q lesson-12.2.sh; then \
+	@if echo "$(SCRIPTS)" | grep -q lesson-12.2.sh; then \
 	  REV=$$(gcloud run services describe documind-api --region $(REGION) --project $(PROJECT) --format='value(status.latestCreatedRevisionName)'); \
 	  gcloud run services update-traffic documind-api --region $(REGION) --project $(PROJECT) --to-revisions $$REV=100 --quiet >/dev/null 2>&1 \
 	    && echo ">> documind-api: 100% of traffic to $$REV, the revision this deploy created (a candidate tag had pinned it - F44)"; fi
@@ -485,9 +473,7 @@ bq-views: guard-project
 # Module 5's production lane (5.5, gap G9): the feature job over the REAL chunks the ingest
 # worker streams into rag_data.chunk_source, then the Dataplex quality scan on what ships.
 # The scan is the gate: read its result the way 5.5's dq_gate() does before rebuilding the index.
-# Full profile only - the lean one has no rag_data dataset.
 features: guard-project
-	@[ "$(PROFILE)" = full ] || (echo "ERROR: features needs PROFILE=full (rag_data, Dataplex)"; exit 1)
 	bq --project_id=$(PROJECT) query --use_legacy_sql=false < terraform/sql/chunk_metadata.sql
 	gcloud dataplex datascans run documind-chunk-dq --project=$(PROJECT) --location=asia-south1 --wait
 	gcloud dataplex datascans describe documind-chunk-dq --project=$(PROJECT) --location=asia-south1 \
@@ -607,13 +593,13 @@ chat-local:
 # cannot go while they use it. Then what only deleting the project removes, printed whether or not destroy got
 # through - a used lab's buckets hold objects and force_destroy is false, so destroy stops on them and says so.
 down: guard-project down-services
-	@if [ "$(PROFILE)" = full ]; then $(MAKE) managed-stores-down; fi
+	$(MAKE) managed-stores-down
 	@rc=0; (cd $(TF_DIR) && $(TF_INIT) && terraform destroy -input=false -auto-approve $(TF_VARS)) || rc=$$?; \
 	echo ">> make down cannot remove these; only deleting the project does:"; \
 	echo ">>   Firestore (default): delete_protection_state = DELETE_PROTECTION_ENABLED (firestore.tf) - chunks, ledger, rosters stay"; \
-	echo ">>   buckets that hold objects: uploads, datasets, audit (force_destroy = false, storage.tf) - and on the full profile the audit bucket's LOCKED retention policy blocks even the project's deletion for five years, by design"; \
+	echo ">>   buckets that hold objects: uploads, datasets, audit (force_destroy = false, storage.tf) - and with AUDIT_LOCK=true the audit bucket's LOCKED retention policy blocks even the project's deletion for five years, by design"; \
 	echo ">>   a tuned endpoint from make tune (evals/tune.py: Vertex AI, not Terraform)"; \
-	echo ">>   a RAG Engine corpus from make rag-corpus on the LEAN profile (managed.py: Vertex AI, not Terraform) - it bills storage until deleted: make managed-stores-down, gcloud ai rag-corpora ... or 4.3's cleanup cell (on full, make down just deleted MANAGED_TENANTS' corpora)"; \
+	echo ">>   a RAG Engine corpus outside MANAGED_TENANTS (make rag-corpus TENANT= by hand; managed.py: Vertex AI, not Terraform) - it bills storage until deleted: managed-stores-down just removed MANAGED_TENANTS' corpora; gcloud ai rag-corpora ... or 4.3's cleanup cell for the rest"; \
 	echo ">>   the BigQuery views make bq-views applied (terraform/sql/*.sql, through bq, not Terraform)"; \
 	echo ">> Delete the throwaway project to stop all billing:"; \
 	echo ">>   gcloud projects delete $(PROJECT)"; exit $$rc
@@ -646,16 +632,19 @@ SLM_REGION ?= us-central1
 
 # ---------- Module 11: the backend is a setting, the gateway is a route, the GPU is a bill ----------
 
-# The LiteLLM gateway (11.3) on the lean lane: CPU-only, scale to zero, behind IAM like every service - the API's
-# and the UI's accounts may invoke it. No database and no master key on lean (GATEWAY_CONFIG=config.yaml is the
-# full profile). Its token proxy fronts the SLM (and the vLLM engine when built) with an ID token per call.
+# The LiteLLM gateway (11.3): CPU-only, scale to zero, behind IAM like every service - the API's and the UI's accounts
+# may invoke it, and the caller's ID token is the door (no master key). Its token proxy fronts the SLM (and the vLLM
+# engine when built) with an ID token per call; its spend logs and tag budgets live in the Cloud SQL instance
+# gateway.tf declares, mounted here as DATABASE_URL through the connector (15 September 2026, with the one shape).
 deploy-gateway: guard-project
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	SLM=https://documind-slm-$$NUMBER.$(SLM_REGION).run.app; VLLM=$${GEMMA_VLLM_URL:-https://documind-vllm-$$NUMBER.$(SLM_REGION).run.app}; \
+	DB=$$(cd $(TF_DIR) && terraform output -raw gateway_database_url); \
 	gcloud run deploy documind-gateway --source services/litellm --region $(REGION) --project $(PROJECT) \
 	  --service-account documind-gateway-sa@$(PROJECT).iam.gserviceaccount.com --no-allow-unauthenticated \
 	  --memory 2Gi --cpu 2 --cpu-boost --min-instances 0 --max-instances 3 --concurrency 20 --timeout 300 \
-	  --set-env-vars "^|^VERTEXAI_PROJECT=$(PROJECT)|GOOGLE_CLOUD_PROJECT=$(PROJECT)|SLM_URL=$$SLM|GEMMA_VLLM_URL=$$VLLM|LITELLM_CONFIG=$(GATEWAY_CONFIG)|ROUTER_ENFORCE=$(ROUTER_ENFORCE)" --quiet; \
+	  --add-cloudsql-instances $(PROJECT):$(REGION):documind-gateway \
+	  --set-env-vars "^|^VERTEXAI_PROJECT=$(PROJECT)|GOOGLE_CLOUD_PROJECT=$(PROJECT)|SLM_URL=$$SLM|GEMMA_VLLM_URL=$$VLLM|DATABASE_URL=$$DB|ROUTER_ENFORCE=$(ROUTER_ENFORCE)" --quiet; \
 	for sa in documind-api-sa documind-ui-sa; do \
 	  gcloud run services add-iam-policy-binding documind-gateway --region $(REGION) --project $(PROJECT) \
 	    --member=serviceAccount:$$sa@$(PROJECT).iam.gserviceaccount.com --role=roles/run.invoker --quiet >/dev/null; done; \
@@ -729,20 +718,19 @@ vllm-off: guard-project
 	gcloud run services update documind-vllm --region $(SLM_REGION) --project $(PROJECT) --min-instances 0 --quiet
 	@echo "documind-vllm scaled to zero"
 
-# 11.5's one-hour comparison: the Autopilot cluster on the lane's VPC, the vLLM manifest with the image make
-# build-vllm pushed, one request through a port-forward - and gke-down, because an empty cluster still bills.
+# 11.5's comparison: the Autopilot cluster is Terraform's (gke.tf; make up creates it, make down removes it), so these
+# two apply and delete the WORKLOAD - the vLLM manifest with the image make build-vllm pushed, one request through a
+# port-forward - and the L4 node it asks for, which is what bills while the pod runs. The cluster's own fee is the
+# shape's, not the hour's.
 gke-up: guard-project
-	cd $(TF_DIR) && $(TF_INIT) && terraform apply -input=false -auto-approve $(TF_VARS) -var gke_cluster=true \
-	  -target=google_container_cluster.autopilot
 	gcloud container clusters get-credentials documind-autopilot --region $(REGION) --project $(PROJECT)
 	IMAGE=$(IMAGE_REPO)/gemma-vllm:latest envsubst < gke/vllm-deployment.yaml | kubectl apply -f -
 	@echo ">> kubectl get pods -w   (an accelerator node takes minutes); then: kubectl port-forward svc/documind-vllm 8080:80"
 
 gke-down: guard-project
+	-gcloud container clusters get-credentials documind-autopilot --region $(REGION) --project $(PROJECT)
 	-IMAGE=$(IMAGE_REPO)/gemma-vllm:latest envsubst < gke/vllm-deployment.yaml | kubectl delete -f - --ignore-not-found
-	cd $(TF_DIR) && $(TF_INIT) && terraform destroy -input=false -auto-approve $(TF_VARS) -var gke_cluster=true \
-	  -target=google_container_cluster.autopilot
-	@echo "documind-autopilot deleted - the cluster fee stops with it"
+	@echo "the vLLM workload is gone and its node with it; documind-autopilot stays (gke.tf) - make down removes the cluster"
 
 # The honest comparison (10.6, 11.4): the same golden rows, retrieval once through the one retrieve(), every backend
 # answering from the same context through the gateway. The four numbers, and the SLM's rupees are a RATE.
@@ -777,8 +765,7 @@ off: guard-project
 	-$(MAKE) vllm-off PROJECT=$(PROJECT)
 	-$(MAKE) gateway-off PROJECT=$(PROJECT)
 	-gcloud run services update documind-ui --region $(REGION) --project $(PROJECT) --min-instances 0 --quiet
-	@if gcloud container clusters describe documind-autopilot --region $(REGION) --project $(PROJECT) >/dev/null 2>&1; then \
-	  $(MAKE) gke-down PROJECT=$(PROJECT); else echo "documind-autopilot: absent"; fi
+	-$(MAKE) gke-down PROJECT=$(PROJECT)
 	@for s in documind-slm documind-vllm documind-gateway documind-ui; do \
 	  f=$$(gcloud run services describe $$s --region $(SLM_REGION) --project $(PROJECT) --format=json 2>/dev/null | $(PY) -c "import json,sys; j=json.load(sys.stdin); print((j['spec']['template']['metadata'].get('annotations') or {}).get('autoscaling.knative.dev/minScale','0'))" 2>/dev/null || \
 	     gcloud run services describe $$s --region $(REGION) --project $(PROJECT) --format=json 2>/dev/null | $(PY) -c "import json,sys; j=json.load(sys.stdin); print((j['spec']['template']['metadata'].get('annotations') or {}).get('autoscaling.knative.dev/minScale','0'))" 2>/dev/null || echo absent); \
@@ -847,7 +834,8 @@ smoke-all: guard-project
 	    echo $$? > $$ST; } | grep -E "PASS|FAIL|pass|fail|not set" || rc=1; \
 	  [ "$$(cat $$ST)" = 0 ] || { rc=1; echo "== $$t: FAILED (exit $$(cat $$ST))"; }; done; rm -f $$ST; exit $$rc
 
-# 12.3 on lean: tenant_daily's GROUP BY over the usage rows in Cloud Logging (evals/usage_rows.py).
+# 12.3: tenant_daily's GROUP BY over the usage rows in Cloud Logging (evals/usage_rows.py) - the same figures the
+# BigQuery view holds, from the rows themselves.
 usage: guard-project
 	$(PY) evals/usage_rows.py --project $(PROJECT) --hours $${HOURS:-24}
 
@@ -960,11 +948,11 @@ managed-status: guard-project
 	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit \
 	  $(PY) managed.py --project $(PROJECT) --status --mode $(if $(filter off,$(MANAGED_MIRROR)),both,$(MANAGED_MIRROR)) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),)
 
-# The managed stores, all of them, on the full profile (13 September 2026, evening): make up runs this after the
+# The managed stores, all of them (13 September 2026, evening): make up runs this after the
 # roster (the policies are set) and before the first ingest - the mirror never creates a store, and a version
 # ingested before its corpus exists waits for the walk's repair (the plan's R6). RAG Engine in serverless mode
 # once, a corpus per `any` tenant (idempotent by name), the data stores already declared by managed.tf
-# (MANAGED_SEARCH=true on full); then the demo's pins, so one deployment answers from all three stores: acme from
+# (MANAGED_SEARCH=true); then the demo's pins, so one deployment answers from all three stores: acme from
 # 4.3's corpus, zeta from 4.4's data store, globex (data_region in) from the kit's own rows. Safe to re-run.
 managed-stores: guard-project
 	$(MAKE) rag-engine-enable
@@ -973,8 +961,8 @@ managed-stores: guard-project
 	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend zeta vertex_search
 	@echo ">> managed stores ready: corpora for $(MANAGED_TENANTS); acme reads rag_engine, zeta vertex_search, globex the kit's rows; make managed-status after make ingest-corpus"
 
-# The corpora bill storage until deleted and are not Terraform's to destroy: make down runs this first on full.
-# The data stores go with terraform destroy. The pins are cleared so a lean redeploy of the same project does not
+# The corpora bill storage until deleted and are not Terraform's to destroy: make down runs this first.
+# The data stores go with terraform destroy. The pins are cleared so a redeploy of the same project does not
 # send acme and zeta to stores that no longer exist.
 managed-stores-down: guard-project
 	@for t in $(MANAGED_TENANTS); do \

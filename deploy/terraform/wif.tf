@@ -68,7 +68,7 @@ variable "deploy_ref" {
   default = "refs/heads/main"
 }
 
-# The lean release job (documind-cd.yml, release-lean) runs the live gate as the roster member and as the outsider -
+# The candidate release job (documind-cd.yml, release-candidate) runs the live gate as the roster member and as the outsider -
 # make eval-live impersonates both - so the deploy identity may mint their tokens, and nothing else's: two accounts,
 # enumerated, for the same reason cicd_actas is.
 resource "google_service_account_iam_member" "cicd_eval_tokens" {

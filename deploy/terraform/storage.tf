@@ -1,20 +1,20 @@
 resource "google_storage_bucket" "uploads" {
-  name          = "${var.project_id}-uploads"
-  location      = var.india_region   # in-region residency (best practice, not a DPDP mandate)
-  force_destroy = false
+  name                        = "${var.project_id}-uploads"
+  location                    = var.india_region # in-region residency (best practice, not a DPDP mandate)
+  force_destroy               = false
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
   versioning { enabled = true }
   lifecycle_rule {
     condition { age = 90 }
-    action    {
+    action {
       type          = "SetStorageClass"
       storage_class = "NEARLINE"
     }
   }
   lifecycle_rule {
     condition { age = 365 }
-    action    { type = "Delete" }
+    action { type = "Delete" }
   }
   cors {
     origin          = ["https://documind.example.com"]
@@ -25,12 +25,12 @@ resource "google_storage_bucket" "uploads" {
 }
 
 resource "google_storage_bucket" "tts_cache" {
-  name          = "${var.project_id}-tts-cache"
-  location      = var.india_region
+  name                        = "${var.project_id}-tts-cache"
+  location                    = var.india_region
   uniform_bucket_level_access = true
   lifecycle_rule {
     condition { age = 30 }
-    action    { type = "Delete" }
+    action { type = "Delete" }
   }
 }
 
@@ -46,7 +46,7 @@ resource "google_storage_bucket" "media" {
   public_access_prevention    = "enforced"
   lifecycle_rule {
     condition { age = 30 }
-    action    { type = "Delete" }
+    action { type = "Delete" }
   }
   cors {
     origin          = ["https://documind.example.com"]
@@ -75,22 +75,23 @@ resource "google_storage_bucket_iam_member" "api_datasets" {
 }
 
 resource "google_storage_bucket" "audit" {
-  name          = "${var.project_id}-audit"
-  location      = var.india_region
+  name                        = "${var.project_id}-audit"
+  location                    = var.india_region
   uniform_bucket_level_access = true
   retention_policy {
-    retention_period = 157680000   # 5 years -- audit/RBI retention best practice (DPDP Act sets no fixed number)
-    # Locked on the full profile only (12 September 2026). A LOCKED policy is irreversible: the bucket cannot be
-    # deleted until its last object ages out, and Google liens the project so the project cannot be deleted either -
-    # five years, for a throwaway lab. The term is the record's protection (an unlocked policy still refuses to delete
-    # or overwrite an object inside it); the lock is what a production account adds. So a lab keeps the term without it.
-    is_locked        = local.full
+    retention_period = 157680000 # 5 years -- audit/RBI retention best practice (DPDP Act sets no fixed number)
+    # Locked only when var.audit_lock says so (15 September 2026; it was the full profile's). A LOCKED policy is
+    # irreversible: the bucket cannot be deleted until its last object ages out, and Google liens the project so the
+    # project cannot be deleted either - five years, for a throwaway lab. The term is the record's protection (an
+    # unlocked policy still refuses to delete or overwrite an object inside it); the lock is what a production
+    # account adds, on purpose: make up AUDIT_LOCK=true.
+    is_locked = var.audit_lock
   }
 }
 
 # audit_log.emit refuses to drop an event, so a writer without this grant fails its request
 # outright: the worker (doc.upload, dlp.finding) and the API's media router (9.4) write here.
-# objectCreator, not objectAdmin - the bucket's retention policy refuses every delete (locked on the full profile),
+# objectCreator, not objectAdmin - the bucket's retention policy refuses every delete (locked when var.audit_lock says so),
 # so nothing may delete.
 resource "google_storage_bucket_iam_member" "ingest_audit" {
   bucket = google_storage_bucket.audit.name

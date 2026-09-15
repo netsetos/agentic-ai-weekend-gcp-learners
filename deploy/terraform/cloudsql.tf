@@ -19,13 +19,11 @@
 # lesson wants it, and nothing else here changes.
 
 resource "random_password" "checkpoint" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   length  = 24
   special = false
 }
 
 resource "google_sql_database_instance" "checkpoint" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   name                = "documind-checkpoint"
   database_version    = "POSTGRES_16"
   region              = var.region
@@ -45,21 +43,18 @@ resource "google_sql_database_instance" "checkpoint" {
 }
 
 resource "google_sql_database" "checkpoint" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   name     = "documind"
-  instance = google_sql_database_instance.checkpoint[0].name
+  instance = google_sql_database_instance.checkpoint.name
 }
 
 resource "google_sql_user" "chat" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   name     = "chat"
-  instance = google_sql_database_instance.checkpoint[0].name
-  password = random_password.checkpoint[0].result
+  instance = google_sql_database_instance.checkpoint.name
+  password = random_password.checkpoint.result
 }
 
 # The DSN is the secret, in the shape 8.5 wrote: the socket directory rides in the query string.
 resource "google_secret_manager_secret" "checkpoint_dsn" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   secret_id = "documind-checkpoint-dsn"
   replication {
     auto {}
@@ -67,21 +62,18 @@ resource "google_secret_manager_secret" "checkpoint_dsn" {
 }
 
 resource "google_secret_manager_secret_version" "checkpoint_dsn" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  secret      = google_secret_manager_secret.checkpoint_dsn[0].id
-  secret_data = "postgresql://chat:${random_password.checkpoint[0].result}@/documind?host=/cloudsql/${google_sql_database_instance.checkpoint[0].connection_name}"
+  secret      = google_secret_manager_secret.checkpoint_dsn.id
+  secret_data = "postgresql://chat:${random_password.checkpoint.result}@/documind?host=/cloudsql/${google_sql_database_instance.checkpoint.connection_name}"
 }
 
 resource "google_secret_manager_secret_iam_member" "chat_dsn" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  secret_id = google_secret_manager_secret.checkpoint_dsn[0].id
+  secret_id = google_secret_manager_secret.checkpoint_dsn.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.chat.email}"
 }
 
 # The connector authenticates the service account, and this is the role it checks.
 resource "google_project_iam_member" "chat_sql_client" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${google_service_account.chat.email}"
@@ -89,5 +81,5 @@ resource "google_project_iam_member" "chat_sql_client" {
 
 output "checkpoint_instance" {
   description = "Pass to --add-cloudsql-instances on documind-chat and to the migration job"
-  value       = one(google_sql_database_instance.checkpoint[*].connection_name)
+  value       = google_sql_database_instance.checkpoint.connection_name
 }

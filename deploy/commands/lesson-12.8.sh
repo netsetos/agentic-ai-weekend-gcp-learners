@@ -7,13 +7,13 @@
 gcloud builds submit --config=cloudbuild.yaml \
   --substitutions=_IMAGE=us-central1-docker.pkg.dev/$PROJECT/documind/chat:$GIT_SHA,_DOCKERFILE=services/chat/Dockerfile .
 
-# 2. The service. Two things differ by profile, and the Makefile fills both (deploy-services):
-#    CHAT_SQL_FLAGS  full: --add-cloudsql-instances + --set-secrets mount the DSN Terraform wrote
-#                    (cloudsql.tf). lean: there is no Cloud SQL and the pair is empty - set, and
-#                    empty, which is why the expansion below is ${VAR-default} and not ${VAR:-default}.
-#    CHAT_EXTRA_ENV  lean: |CHECKPOINT_DSN=memory - the in-memory checkpointer, which agent.py logs
-#                    as "tests only" because a conversation dies with the instance (8.5). A demo can
-#                    live with that; a product cannot, and the full profile says so with a database.
+# 2. The service. The Makefile fills two variables (deploy-services), and the expansions below are ${VAR-default}
+#    rather than ${VAR:-default} so a value set to the empty string stays empty:
+#    CHAT_SQL_FLAGS  --add-cloudsql-instances + --set-secrets mount the DSN Terraform wrote (cloudsql.tf) - the
+#                    Cloud SQL checkpointer, always (15 September 2026: one shape). CHECKPOINT_DSN=memory is still
+#                    a valid value for a laptop - the in-memory checkpointer agent.py logs as "tests only",
+#                    because a conversation dies with the instance (8.5) - and no deployment uses it.
+#    CHAT_EXTRA_ENV  extra environment for the service, empty on the lane.
 #    DOCUMIND_PROFILE=gcp is stated so agent.py's local bypass is unreachable. IAP_AUDIENCE lists
 #    this surface AND the UI: the UI forwards the person's assertion when its brain radio calls
 #    this service (12.4), and that assertion was minted for the UI's audience. SELF_URL is the
@@ -43,8 +43,6 @@ for who in documind-ui-sa documind-outsider-sa; do
 done
 
 # 3. The one-time checkpoint migration (8.5: setup() takes exclusive locks - a job, never startup).
-#    Full profile only: the lean lane has no database to migrate.
-if [ "${PROFILE-full}" = full ]; then
 gcloud run jobs create documind-checkpoint-setup \
   --image=us-central1-docker.pkg.dev/$PROJECT/documind/chat:$GIT_SHA \
   --region=us-central1 --service-account=documind-chat-sa@$PROJECT.iam.gserviceaccount.com \
@@ -53,9 +51,8 @@ gcloud run jobs create documind-checkpoint-setup \
   --command=python --args=migrate.py || echo "job exists - continuing"
 gcloud run jobs execute documind-checkpoint-setup --region=us-central1 --wait
 
-# 4. IAP in front of the human surface, AFTER the service exists (step 4 of the runbook above).
-#    Full profile only: on lean this service is a backend the UI and the smoke test call with ID
-#    tokens, and IAP would refuse exactly those callers.
+# 4. IAP in front of the human surface, AFTER the service exists (step 4 of the runbook above). The UI's brain radio
+#    and make smoke-chat still reach it: IAP_AUDIENCE above lists both surfaces, and the bearer leg (SELF_URL) is
+#    verified by shared/iap.identity when there is no assertion.
 gcloud beta run services update documind-chat --region=us-central1 --iap
-fi
 

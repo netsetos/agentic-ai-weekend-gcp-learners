@@ -18,13 +18,11 @@
 # everything below does.
 
 resource "google_project_service" "dataplex" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   service            = "dataplex.googleapis.com"
   disable_on_destroy = false
 }
 
 resource "google_bigquery_dataset" "rag_data" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   dataset_id                 = "rag_data"
   location                   = var.india_region
   description                = "Chunk features, ingest events and the index feed (lesson 5.5); chunk_source is streamed by the ingest worker"
@@ -33,15 +31,13 @@ resource "google_bigquery_dataset" "rag_data" {
 
 # The worker writes; the admin surface already reads project-wide (sa.tf).
 resource "google_bigquery_dataset_iam_member" "ingest_writer" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  dataset_id = google_bigquery_dataset.rag_data[0].dataset_id
+  dataset_id = google_bigquery_dataset.rag_data.dataset_id
   role       = "roles/bigquery.dataEditor"
   member     = "serviceAccount:${google_service_account.ingest.email}"
 }
 
 resource "google_bigquery_table" "chunk_source" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  dataset_id          = google_bigquery_dataset.rag_data[0].dataset_id
+  dataset_id          = google_bigquery_dataset.rag_data.dataset_id
   table_id            = "chunk_source"
   deletion_protection = false
   description         = "One row per indexed chunk, streamed by services/ingest - the canonical document, plus the worker's DLP verdict"
@@ -67,8 +63,7 @@ resource "google_bigquery_table" "chunk_source" {
 }
 
 resource "google_bigquery_table" "chunk_metadata" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  dataset_id          = google_bigquery_dataset.rag_data[0].dataset_id
+  dataset_id          = google_bigquery_dataset.rag_data.dataset_id
   table_id            = "chunk_metadata"
   deletion_protection = false
   description         = "One row per chunk: the feature table and the join key back to the corpus (5.5). No text, no vectors."
@@ -97,8 +92,7 @@ resource "google_bigquery_table" "chunk_metadata" {
 }
 
 resource "google_bigquery_table" "ingest_events" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  dataset_id          = google_bigquery_dataset.rag_data[0].dataset_id
+  dataset_id          = google_bigquery_dataset.rag_data.dataset_id
   table_id            = "ingest_events"
   deletion_protection = false
   description         = "Append-only: what changed and when. 'withheld' is the row an auditor asks about."
@@ -118,8 +112,7 @@ resource "google_bigquery_table" "ingest_events" {
 }
 
 resource "google_bigquery_table" "index_feed" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
-  dataset_id          = google_bigquery_dataset.rag_data[0].dataset_id
+  dataset_id          = google_bigquery_dataset.rag_data.dataset_id
   table_id            = "index_feed"
   deletion_protection = false
   description         = "What SHIPS to the index - chunk_metadata minus PII and minus fragments, by subtraction. The scan below gates on this table."
@@ -140,13 +133,12 @@ resource "google_bigquery_table" "index_feed" {
 # not get rebuilt. On demand: `make features` runs the job and then the scan, and reads the
 # result the way 5.5's dq_gate() does.
 resource "google_dataplex_datascan" "chunk_dq" {
-  count = local.full ? 1 : 0   # the full profile only (variables.tf)
   location     = var.india_region
   data_scan_id = "documind-chunk-dq"
   display_name = "DocuMind index feed quality"
 
   data {
-    resource = "//bigquery.googleapis.com/projects/${var.project_id}/datasets/${google_bigquery_dataset.rag_data[0].dataset_id}/tables/${google_bigquery_table.index_feed[0].table_id}"
+    resource = "//bigquery.googleapis.com/projects/${var.project_id}/datasets/${google_bigquery_dataset.rag_data.dataset_id}/tables/${google_bigquery_table.index_feed.table_id}"
   }
 
   execution_spec {
@@ -185,4 +177,4 @@ resource "google_dataplex_datascan" "chunk_dq" {
   depends_on = [google_project_service.dataplex]
 }
 
-output "chunk_dq_scan" { value = one(google_dataplex_datascan.chunk_dq[*].name) }
+output "chunk_dq_scan" { value = google_dataplex_datascan.chunk_dq.name }

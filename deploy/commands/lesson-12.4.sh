@@ -9,8 +9,8 @@
 # invoker, granted below). MIN_INSTANCES is 1 on a session day and 0 after.
 #
 # The env delimiter is ^|^: the values carry ':' (URLs) and ',' (ADMIN_EMAILS). RAG_API_URL
-# is the API's deterministic run.app URL; CHAT_URL is empty in the lean profile and chat.py
-# hides the surface; the VECTOR_ pair is empty there too. IAP_AUDIENCE is THIS service's:
+# is the API's deterministic run.app URL; CHAT_URL is the chat service's (make deploy-services sets it;
+# empty, and chat.py hides the surface); the VECTOR_ pair comes from the state. IAP_AUDIENCE is THIS service's:
 # /projects/NUMBER/locations/REGION/services/documind-ui, project number, leading slash.
 gcloud run deploy documind-ui \
   --image=${REGION:-us-central1}-docker.pkg.dev/$PROJECT/documind/ui:$GIT_SHA \

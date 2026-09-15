@@ -1,40 +1,40 @@
-variable "project_id"  { type = string }
-variable "region"      {
+variable "project_id" { type = string }
+variable "region" {
   type    = string
   default = "us-central1"
 }
-variable "india_region"{
+variable "india_region" {
   type    = string
   default = "asia-south1"
 }
-variable "env"         {
+variable "env" {
   type    = string
   default = "dev"
-}  # dev | staging | prod
+} # dev | staging | prod
 
-# Which of the kit's two shapes this project gets. `lean` is the Module 4 lane and nothing
-# else: Cloud Run, Firestore with its vector indexes, one Document AI processor, the uploads
-# bucket, the service accounts, secrets, budget and alerts - close to nothing while idle.
-# `full` adds what Module 12 teaches on top: Vector Search and its endpoint (the ANN tier,
-# the one line item that bills by the hour), the Spanner Graph trial, the Cloud SQL
-# checkpointer, GKE, the BigQuery mirror and Dataplex scan, the log sink and Cloud Deploy.
-# Same files, `count` on the difference; flip it and apply again, nothing is thrown away.
-variable "profile" {
-  type    = string
-  default = "lean"           # lean | full
-  validation {
-    condition     = contains(["lean", "full"], var.profile)
-    error_message = "profile must be lean or full."
-  }
+# ONE SHAPE (15 September 2026). Until then the kit had two profiles - `lean`, the Module 4 lane, and `full`,
+# everything Module 12 teaches on top of it, count-gated in the same files behind `local.full`. The course
+# runs the full shape only now, so the gate is gone and every resource below is declared unconditionally:
+# Vector Search and its endpoint (the ANN tier, the one line item that bills by the hour), the Spanner
+# Graph trial, the Cloud SQL checkpointer, the Autopilot cluster, the BigQuery mirror and Dataplex scan,
+# the log sink, Cloud Deploy, the gateway's database. What the gate used to switch that is NOT a resource
+# count stays a switch of its own, named for what it does: `audit_lock` and `gemini_quota_override` below.
+
+# The audit bucket's retention policy is five years either way (storage.tf); LOCKING it is a separate
+# decision. A locked policy is irreversible - the bucket cannot be deleted until its last object ages out,
+# and Google liens the project so the project cannot be deleted either. That is what a production account
+# wants and what a throwaway lab must never do by accident, so it is false here and true on purpose
+# (`make up AUDIT_LOCK=true`).
+variable "audit_lock" {
+  type    = bool
+  default = false
 }
 
-locals {
-  full = var.profile == "full"
-}
-
-# 11.5's Autopilot cluster on the lean lane, for one hour: make gke-up sets it, make gke-down clears it. Off by default
-# because an empty cluster still bills its fee (Rs 6,000 a month for nothing).
-variable "gke_cluster" {
+# quota.tf's Gemini consumer quota override. The metric and limit names there are the shape the API
+# documents, not names verified on a project - an unknown metric fails the whole apply - so the override is
+# applied only when asked for (`make up GEMINI_QUOTA_OVERRIDE=true`), after the names are checked with
+# `gcloud alpha services quota list --service=aiplatform.googleapis.com`.
+variable "gemini_quota_override" {
   type    = bool
   default = false
 }
@@ -63,7 +63,7 @@ variable "github_repository_id" {
 # and it is the switch that keeps PII in-country without editing code.
 variable "residency" {
   type    = string
-  default = "india"          # india | us
+  default = "india" # india | us
   validation {
     condition     = contains(["india", "us"], var.residency)
     error_message = "residency must be india or us."

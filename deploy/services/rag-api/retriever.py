@@ -309,7 +309,7 @@ def _search_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | Non
 def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None = None,
                     vec: list[float] | None = None, backend: str | None = None) -> list[dict]:
     """The dense pool: Vector Search (dense or hybrid) with the Firestore fallback beneath it, Firestore's own
-    vector index on the lean profile, or a managed store (rag_engine, P9.4; vertex_search, R4) - the same tenant /
+    vector index when a request is routed to it, or a managed store (rag_engine, P9.4; vertex_search, R4) - the same tenant /
     current / filter predicates on every path. `backend` is the one main.py chose for THIS request (the tenant's pin, held against
     its data_region - 13 September 2026, evening); the deployment's RETRIEVAL_BACKEND when the caller names none."""
     backend = backend or settings.retrieval_backend
@@ -319,7 +319,7 @@ def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None
     if backend == "vertex_search":
         return prefer_current(_search_retrieve(query, tenant_id, top_k, filters, vec=vec))
     if backend == "firestore":
-        # The lean profile (deploy/README.md): no Vector Search endpoint exists, on purpose.
+        # The Firestore rung on its own (RETRIEVAL_BACKEND=firestore, or a tenant pinned to it): no endpoint is asked.
         # Firestore holds every embedding indexer.py wrote and its own vector index answers,
         # tenant pre-filtered - the fallback below, chosen rather than fallen into.
         return prefer_current(_firestore_fallback(vec, tenant_id, settings.top_k_retrieve, filters))

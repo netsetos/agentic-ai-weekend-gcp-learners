@@ -1,49 +1,27 @@
+# services/litellm/config.yaml - the gateway's one config (15 September 2026; until then config.lean.yaml was the
+# lane's and this file the full profile's). Module 11 (11.3 rebuilt on the lane, 10 Sept 2026).
+#
+# The gateway is a Cloud Run service behind IAM like every other on the lane, and the caller's ID token is the door:
+# no master key (a master key would make every caller's ID token an invalid virtual key) and no Langfuse (nothing on the
+# lane provisions one). The database IS here: the Cloud SQL Postgres gateway.tf declares, mounted by make deploy-gateway
+# as DATABASE_URL through the connector, holds LiteLLM's spend logs and the tag budgets at the bottom of this file. The
+# self-hosted routes point at the TOKEN PROXY inside this container (token_proxy.py, 127.0.0.1:8090), which forwards to
+# the Cloud Run backend with a Google ID token it mints per call: LiteLLM reads litellm_params.api_key once, at startup,
+# and an ID token lives an hour, so a pasted token expires at 3am on a path nobody is watching.
+#
+# Rates are STANDARD (from 1 Jan 2027; 3.6-flash bills an introductory 0.75/3.75 until then). The self-hosted figure is
+# a RATE, not a price: Rs 86,904 a month for the L4 instance over ~50M tokens - it only holds at that volume (11.4).
+
 model_list:
-  # ---- self-hosted: the 11.2 FastAPI + vLLM service on Cloud Run --------------
-  - model_name: documind-inference
-    litellm_params:
-      model: hosted_vllm/google/gemma-3-4b-it
-      api_base: os.environ/GEMMA_VLLM_URL          # .../v1 on Cloud Run
-      # Cloud Run IAM wants a Google-signed ID TOKEN for THIS service's audience,
-      # not a shared secret. gcp_id_token.py mints one and refreshes it; tokens
-      # live ~1h, so a pasted string works all through the demo and expires in
-      # production - at 3am, on a path nobody is watching.
-      api_key: os.environ/GEMMA_ID_TOKEN
-      rpm: 60
-      tpm: 100000
-      input_cost_per_token: 0.0000068              # see the cost note below
-      output_cost_per_token: 0.0000068
-
-  - model_name: documind-sensitive                 # tag-routed alias, same deployment
-    litellm_params:
-      model: hosted_vllm/google/gemma-3-4b-it
-      api_base: os.environ/GEMMA_VLLM_URL
-      api_key: os.environ/GEMMA_ID_TOKEN
-      tags: ["sensitive", "hipaa", "gdpr", "dpdpa"]
-      input_cost_per_token: 0.0000068
-      output_cost_per_token: 0.0000068
-
-  # ---- offline / edge lane: Ollama on a laptop or an e2b sandbox --------------
-  - model_name: documind-e2b
-    litellm_params:
-      model: ollama_chat/gemma3:4b
-      api_base: os.environ/OLLAMA_BASE_URL
-      tags: ["offline", "dev"]
-      input_cost_per_token: 0
-      output_cost_per_token: 0
-
-  # ---- managed: Gemini on the GLOBAL endpoint --------------------------------
-  # Gemini 3.x generation is served ONLY from `global`. A regional vertex_location
-  # here returns 404 model-not-found, and the fallback chain hides it as "the
-  # gateway is flaky".
+  # ---- managed: Gemini on the GLOBAL endpoint - the default answer, and where every fallback ends ---------------
   - model_name: documind-general
     litellm_params:
       model: vertex_ai/gemini-3.6-flash
       vertex_project: os.environ/VERTEXAI_PROJECT
       vertex_location: global
       tags: ["general", "public"]
-      input_cost_per_token: 0.0000015              # $1.50 / 1M, standard
-      output_cost_per_token: 0.0000075             # $7.50 / 1M, standard
+      input_cost_per_token: 0.0000015
+      output_cost_per_token: 0.0000075
 
   - model_name: documind-reasoning
     litellm_params:
@@ -51,65 +29,74 @@ model_list:
       vertex_project: os.environ/VERTEXAI_PROJECT
       vertex_location: global
       tags: ["complex", "reasoning"]
-      input_cost_per_token: 0.0000020              # $2.00 / 1M
-      output_cost_per_token: 0.0000120             # $12.00 / 1M
+      input_cost_per_token: 0.0000020
+      output_cost_per_token: 0.0000120
 
-  # ---- the fine-tune from 10.5, served on Cloud Run L4 (11.4) ---------------
-  # NEW in 11.4 and named for what it is (gap G12). documind-e2b above is a different
-  # thing - stock gemma3:4b on a laptop - and stays as it is. The SLM was reachable
-  # before this entry only if OLLAMA_BASE_URL happened to point at it.
+  # ---- the fine-tune from 10.5, served by Ollama on a Cloud Run L4 (11.4), through the token proxy ---------------
   - model_name: documind-slm
     litellm_params:
       model: ollama_chat/documind-slm
-      api_base: os.environ/SLM_URL                 # https://documind-slm-...run.app
-      api_key: os.environ/SLM_ID_TOKEN             # Cloud Run IAM, same as 11.3
+      api_base: http://127.0.0.1:8090/slm
       tags: ["residency-in", "tuned"]
-      # Rs 86,904/month / ~50M tokens = ~Rs 0.0017 per token, either direction.
-      # A RATE, not a price: it only holds at that volume.
+      timeout: 110                                  # a cold GPU is 30-60 s away; the API waits 90
       input_cost_per_token: 0.0000205
       output_cost_per_token: 0.0000205
 
-  # ---- the GKE Autopilot pool from 11.5: vLLM on L4s, the batch lane ----------
-  # Reached through the ClusterIP or the port-forward 11.5 sets up; the same L4
-  # class as the Cloud Run SLM, so the same rate and the same caveat.
+  # The pre-call hook's target for RESTRICTED text (a PAN, an Aadhaar): the self-hosted model, and NO fallback to
+  # Gemini - the point of the route is that the text does not leave. A cold GPU means a slow answer, not a leak.
+  - model_name: documind-sensitive
+    litellm_params:
+      model: ollama_chat/documind-slm
+      api_base: http://127.0.0.1:8090/slm
+      tags: ["sensitive", "dpdpa"]
+      timeout: 110
+      input_cost_per_token: 0.0000205
+      output_cost_per_token: 0.0000205
+
+  # ---- 11.1 / 11.2's route: the vLLM engine on a Cloud Run L4 (make build-vllm deploy-vllm; optional, D3), through the
+  # token proxy. Not deployed -> the proxy answers 502 and the fallback below hands the request to the SLM, then Gemini.
+  - model_name: documind-inference
+    litellm_params:
+      model: hosted_vllm/google/gemma-3-4b-it
+      api_base: http://127.0.0.1:8090/vllm/v1
+      api_key: unused
+      tags: ["self-hosted"]
+      timeout: 110
+      input_cost_per_token: 0.0000068
+      output_cost_per_token: 0.0000068
+
+  # ---- the GKE Autopilot pool from 11.5: vLLM on L4s, the batch lane. Reached through the ClusterIP 11.5's manifest
+  # exposes (GKE_VLLM_URL; the cluster sits on the lane's VPC, gke.tf); the same L4 class as the Cloud Run SLM, so the
+  # same rate and the same caveat. Absent -> the fallback answers.
   - model_name: documind-gke
     litellm_params:
       model: hosted_vllm/google/gemma-3-4b-it
-      api_base: os.environ/GKE_VLLM_URL            # http://vllm.documind.svc:8000/v1 or a port-forward
+      api_base: os.environ/GKE_VLLM_URL
       tags: ["batch", "gke"]
+      timeout: 110
       input_cost_per_token: 0.0000205
       output_cost_per_token: 0.0000205
 
 router_settings:
   routing_strategy: simple-shuffle
   enable_tag_filtering: true
-  # BIDIRECTIONAL on purpose. Self-host down -> Gemini answers. Gemini down or
-  # over budget -> the self-hosted Gemma answers. Neither direction is a dead end,
-  # which is what makes killing the proxy a survivable event rather than an outage.
+  # Self-host cold, scaled to zero or out of quota -> Gemini answers. Only the sensitive route has nowhere to go.
   fallbacks:
-    - documind-inference: ["documind-e2b", "documind-general"]
-    - documind-e2b: ["documind-inference"]
-    - documind-sensitive: ["documind-general"]
-    - documind-general: ["documind-sensitive"]
-    - documind-reasoning: ["documind-general"]
-    # If the GPU is cold, scaled to zero, or out of quota, answer anyway. min-instances 0
-    # means the SLM is sometimes genuinely absent, and a 40-second cold start is a timeout
-    # to anyone waiting - Gemini answers while the GPU wakes up (11.4).
     - documind-slm: ["documind-general"]
+    - documind-inference: ["documind-slm", "documind-general"]
     - documind-gke: ["documind-inference", "documind-general"]
-  num_retries: 3
-  timeout: 30
+    - documind-reasoning: ["documind-general"]
+  num_retries: 2
   allowed_fails: 3
   cooldown_time: 60
   retry_policy:
-    RateLimitErrorRetries: 3
-    TimeoutErrorRetries: 2
-    InternalServerErrorRetries: 2
+    RateLimitErrorRetries: 2
+    TimeoutErrorRetries: 1
+    InternalServerErrorRetries: 1
     AuthenticationErrorRetries: 0
 
-# Presidio lives HERE and only here. Each backend redacts for its own logs, but the
-# decision "may this text leave our perimeter" is made once, at the gateway, where
-# every route passes. Put it in two places and you get two answers.
+# Presidio lives HERE and only here (11.3): the decision "may this text leave our perimeter" is made once, at the
+# gateway, where every route passes.
 guardrails:
   - guardrail_name: "documind-pii-router"
     litellm_params:
@@ -118,12 +105,12 @@ guardrails:
       callback_class: documind_router.DocuMindRouter
 
 litellm_settings:
-  callbacks: ["langfuse_otel"]
-  langfuse_default_tags: ["environment", "model", "tenant"]
+  drop_params: true              # a backend that does not know a parameter (stream_options on Ollama) is not an error
+  set_verbose: false
 
+# The spend logs and the tag budgets need Postgres: the Cloud SQL instance gateway.tf declares, over the unix socket the
+# Cloud Run connector mounts (make deploy-gateway: --add-cloudsql-instances, DATABASE_URL from the state's output).
 general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
-  # Cloud SQL Postgres over the unix socket the Cloud Run connector mounts.
   database_url: os.environ/DATABASE_URL
 
 tag_budget_config:
