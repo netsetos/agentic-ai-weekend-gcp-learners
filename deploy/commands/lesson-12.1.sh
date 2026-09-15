@@ -6,9 +6,11 @@
 gcloud config set project $PROJECT
 
 # Two calls, not one: the Service Usage API takes at most 20 services per request
-# (SU_MAX_BATCH_SIZE_EXCEEDED), and this list is 36 - Vision, Natural Language and
+# (SU_MAX_BATCH_SIZE_EXCEEDED), and this list is 40 - Vision, Natural Language and
 # Translation joined it with Module 9 (9.3), Vector Search with the managed mirror
-# (P9, 13 September 2026: it backs 4.3's serverless RAG Engine corpora). Both are idempotent.
+# (P9, 13 September 2026: it backs 4.3's serverless RAG Engine corpora), and Spanner, GKE,
+# Cloud Deploy and Org Policy with the one shape (15 September 2026: spanner.tf, gke.tf,
+# clouddeploy.tf and org_policy.tf declare resources those APIs serve). Both are idempotent.
 gcloud services enable \
   run.googleapis.com \
   compute.googleapis.com \
@@ -28,7 +30,8 @@ gcloud services enable \
   dlp.googleapis.com \
   iap.googleapis.com \
   iamcredentials.googleapis.com \
-  cloudbuild.googleapis.com
+  cloudbuild.googleapis.com \
+  orgpolicy.googleapis.com
 
 gcloud services enable \
   cloudtrace.googleapis.com \
@@ -47,7 +50,10 @@ gcloud services enable \
   cloudbilling.googleapis.com \
   cloudresourcemanager.googleapis.com \
   serviceusage.googleapis.com \
-  vectorsearch.googleapis.com
+  vectorsearch.googleapis.com \
+  spanner.googleapis.com \
+  container.googleapis.com \
+  clouddeploy.googleapis.com
 
 # ---- APPLY ----
 # Dry-run first

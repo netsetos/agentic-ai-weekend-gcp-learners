@@ -103,3 +103,8 @@ jobs:
         run: python tools/check_eval_gate.py
       - name: Gate - the Colab links (one learner branch, the right one)
         run: python tools/check_colab_links.py
+
+      # The from-scratch runbook (course-bibles/, 15 September 2026) is generated from deploy/ file by file;
+      # a kit change without a regeneration would hand an operator stale bytes. Absent (the learner repo): a no-op.
+      - name: The from-scratch runbook is what deploy/ produces
+        run: python tools/build_rag_runbook.py --check
