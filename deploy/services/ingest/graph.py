@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Build a tenant's knowledge graph from its current chunks - lesson 4.6, on the lane (13 September 2026).
 
-    python graph.py --project P --tenant acme [--limit 200] [--rebuild] [--dry-run] [--ask "Which Acts ..."]
+    python graph.py --project P --tenant acme [--limit 200] [--source hr_policy_2026.md] [--rebuild] [--dry-run] [--ask "Which Acts ..."]
 
 4.6's pipeline, as a tool: every current text chunk of the tenant (the handbook's GEN- boilerplate skipped) through
 gemini-3.1-flash-lite with the lesson's GraphExtraction schema and system prompt - entities and relations STATED in
@@ -11,7 +11,9 @@ way (a stable id from the canonical name, the chunk ids that make citations poss
 written through shared/documind_graph.FirestoreGraph - the same class the notebook runs - into graph_nodes and
 graph_edges beside the chunks. An extraction is cached in graph_extractions/{tenant}:{chunk_id} under the chunk's
 hash, so a rerun pays for new or changed chunks only. --rebuild erases the tenant's graph first; --limit is the bill
-(200 chunks is a few rupees; ACME's 1,600 are priced in 4.6's Cell 12). --ask walks the graph for one question and
+(200 chunks is a few rupees; ACME's 1,600 are priced in 4.6's Cell 12). --source keeps one document's chunks (a
+substring of source_uri, 16 September 2026): reading order sorts the Acts before the handbook, so a demonstration
+that wants the handbook's entities names the handbook rather than guessing a limit. --ask walks the graph for one question and
 prints the seeds, the nodes and the chunk ids the API would put in front of its dense pool (RETRIEVAL_GRAPH=on|auto).
 Needs, on Cloud Shell: pip install --user google-genai==2.22.0 google-cloud-firestore==2.30.0 numpy.
 """
@@ -122,12 +124,15 @@ def resolve_entities(names: list, embed) -> dict:
     return canon_of
 
 
-def load_chunks(db, tenant: str, limit: int | None) -> list[dict]:
-    """The tenant's current text chunks, in reading order per source; GEN- boilerplate and media skipped."""
+def load_chunks(db, tenant: str, limit: int | None, source: str | None = None) -> list[dict]:
+    """The tenant's current text chunks, in reading order per source; GEN- boilerplate and media skipped.
+    `source` keeps the chunks of one document (a substring of source_uri) - the whole corpus otherwise."""
     rows = []
     for snap in db.collection("chunks").where("tenant_id", "==", tenant).stream():
         x = snap.to_dict() or {}
         if x.get("current") is False or x.get("kind", "text") != "text" or (x.get("section") or "").startswith("GEN-"):
+            continue
+        if source and source not in (x.get("source_uri") or ""):
             continue
         rows.append({"chunk_id": snap.id, "text": x.get("text", ""), "source_uri": x.get("source_uri", ""),
                      "chunk_hash": x.get("chunk_hash") or hashlib.sha256(re.sub(r"\s+", " ", x.get("text", "")).strip().encode()).hexdigest(),
@@ -175,6 +180,7 @@ def main() -> int:
     ap.add_argument("--project", default=os.environ.get("GOOGLE_CLOUD_PROJECT"))
     ap.add_argument("--tenant", default="acme")
     ap.add_argument("--limit", type=int, help="chunks to extract, in reading order (the bill)")
+    ap.add_argument("--source", help="only the chunks whose source_uri contains this - one document's graph")
     ap.add_argument("--rebuild", action="store_true", help="erase the tenant's graph first")
     ap.add_argument("--dry-run", action="store_true", help="count the chunks; extract nothing")
     ap.add_argument("--ask", help="walk the graph for one question and print what the API would fetch")
@@ -189,8 +195,9 @@ def main() -> int:
         print(json.dumps({"question": args.ask, "seeds": [s["name"] for s in r["seeds"]],
                           "nodes": [n["name"] for n in r["nodes"]], "chunk_ids": r["chunk_ids"]}, indent=1))
         return 0
-    chunks = load_chunks(db, args.tenant, args.limit)
-    print(f"{len(chunks)} current text chunks for tenant {args.tenant!r}" + (f" (first {args.limit})" if args.limit else ""))
+    chunks = load_chunks(db, args.tenant, args.limit, args.source)
+    print(f"{len(chunks)} current text chunks for tenant {args.tenant!r}" + (f" from {args.source!r}" if args.source else "")
+          + (f" (first {args.limit})" if args.limit else ""))
     if args.dry_run:
         return 0
     from google import genai

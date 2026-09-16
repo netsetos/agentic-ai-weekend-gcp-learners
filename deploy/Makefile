@@ -1022,6 +1022,8 @@ tenant-backend: guard-project
 # services/ingest/graph.py: the tenant's current chunks through the lesson's extraction, resolution and build, written
 # with shared/documind_graph.FirestoreGraph - the class the notebook runs - into graph_nodes / graph_edges. Then the API
 # reads it: make candidate RETRIEVAL_GRAPH=auto (a relational question with a seed entity) or =on (every question), the
+# whole corpus by default; GRAPH_ARGS="--source hr_policy_2026.md" builds one document's graph deterministically (16 September
+# 2026: reading order sorts the Acts before the handbook, so a limit never reached the handbook's entities once the corpus was in).
 # gate on the candidate, make promote. GRAPH_ARGS="--limit 200" is the bill; --ask "..." walks it for one question.
 # Needs: pip install --user google-genai==2.22.0 google-cloud-firestore==2.30.0 numpy
 GRAPH_ARGS ?=
