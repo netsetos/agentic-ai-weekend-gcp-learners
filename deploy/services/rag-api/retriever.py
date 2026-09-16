@@ -67,6 +67,10 @@ def _firestore_fallback(vec: list[float], tenant_id: str, top_k: int, filters: d
         # reranker can order the same way it orders Vector Search results.
         d["score"] = 1.0 - d.pop("d", 1.0)
         d.pop("embedding", None)          # never ship 768 floats to the model
+        # Which rung answered (16 September 2026). The managed backends and the graph have always
+        # said; the two rungs of the kit's own tier never did, so a fallback and a hit looked the
+        # same to the caller, to tenant_daily, and to anyone watching a demonstration.
+        d["found_by"] = "firestore"
         out.append(d)
     return out
 
@@ -367,7 +371,10 @@ def _dense_retrieve(query: str, tenant_id: str, top_k: int, filters: dict | None
     # Firestore's `in` takes up to 30 values: 20 is one query, and a pool of 50
     # (TOP_K_RETRIEVE, the knob the ablation moves) is two - never one query
     # over the limit, which Firestore refuses rather than truncates.
-    return prefer_current(_hydrate(ids[:settings.top_k_retrieve], scores))
+    pool = _hydrate(ids[:settings.top_k_retrieve], scores)
+    for c in pool:
+        c["found_by"] = "vector"          # these ids came from find_neighbors, not from Firestore's own index (16 September 2026)
+    return prefer_current(pool)
 
 
 def graph_candidates(query: str, tenant_id: str, filters: dict | None = None) -> list[dict]:

@@ -7,7 +7,15 @@ resource "google_vertex_ai_index" "documind" {
   description  = "DocuMind chunk embeddings, 768-d, streaming upserts"
 
   metadata {
-    contents_delta_uri = "gs://${google_storage_bucket.uploads.name}/index-delta"
+    # NO contents_delta_uri, deliberately (16 September 2026). That field is the BATCH ingest
+    # input - the folder of datapoint files the API reads AT CREATE TIME - and this index is
+    # STREAM_UPDATE: indexer.py's upsert_datapoints is the only way in, and nothing in the kit
+    # ever writes a delta file. So the folder was always empty, and CreateIndex refuses an empty
+    # contentsDeltaUri. Google's own request for an empty streaming index omits the field.
+    # Naming it cost the first from-blank apply its index, and every from-blank apply after it:
+    # the endpoint came up, the deployed index never did, and the two outputs the worker and the
+    # API read were missing. An empty index is the correct starting state - the worker fills it,
+    # and `make backfill-vectors` fills it from the rows when the worker could not.
     config {
       dimensions                  = 768
       approximate_neighbors_count = 150

@@ -160,6 +160,26 @@ def main() -> int:
     else:
         bad("query", f"status={st} body={body[:120]}")
 
+    # 3a. THE ANN TIER (16 September 2026). The deployment's default is /version's; the backend that served THIS
+    # request is stages.retrieval_backend, because a tenant pin or its data_region may have redirected it - and a
+    # redirected request is not a failure, so the line asserts only when this request ran on `vector`. There,
+    # vector_chunks = 0 is the one failure a working demo hides: the Firestore rung answered, the answer looked
+    # right, and /version still said Vector Search. make vector-status counts the tier; make backfill-vectors fills it.
+    st, vbody = call("GET", "/version", token)
+    try:
+        ver = json.loads(vbody) if st == 200 else {}
+    except json.JSONDecodeError:
+        ver = {}
+    stg = j.get("stages") or {}
+    if j and ver.get("retrieval_backend") == "vector" and stg.get("retrieval_backend", "vector") == "vector":
+        if stg.get("vector_chunks", 0) > 0:
+            ok("vector tier", f"{stg['vector_chunks']} of {stg.get('pool')} chunks came from the index")
+        else:
+            bad("vector tier", "RETRIEVAL_BACKEND=vector and no chunk came from the index - the Firestore rung "
+                               "answered. make vector-status; make backfill-vectors APPLY=1")
+    elif j:
+        print(f"  [ -- ] vector tier  this request ran on {stg.get('retrieval_backend', ver.get('retrieval_backend'))} — skipped")
+
     # 3b. the same question with NO token: the door must refuse before the roster is even asked. 12.8: a smoke
     # made only of "does it work?" cannot tell an open service from a closed one, so this line asserts a refusal.
     st, body = call("POST", "/v1/query", None, body=q)
@@ -171,11 +191,7 @@ def main() -> int:
     # 3c. the answer cache (12.6, SEMANTIC_CACHE=on): the same question again is a hit - answered from Firestore with
     # the citations it had, backend=cache, cost 0 - and identical citations prove it is the SAME answer, not a near
     # one. Off (the lane's default), the line says so and asserts nothing: a cache that is off is not a failure.
-    st, vbody = call("GET", "/version", token)
-    try:
-        cache_on = st == 200 and json.loads(vbody).get("semantic_cache") == "on"
-    except json.JSONDecodeError:
-        cache_on = False
+    cache_on = ver.get("semantic_cache") == "on"          # /version was read once, above (3a)
     if cache_on:
         st, body = call("POST", "/v1/query", token, body=q)
         try:

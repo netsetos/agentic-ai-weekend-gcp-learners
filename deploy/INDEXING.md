@@ -106,7 +106,12 @@ the walk repairs the moment the object is back; the second is a decision, which 
 `retrieve()` asks Firestore (or Vector Search) for the tenant's nearest chunks, with `current == true` as a
 pre-filter when `RETRIEVAL_CURRENT_ONLY=on` (the second vector index in `firestore_indexes.tf`). Whatever the
 switch, `prefer_current()` drops retired rows and then keeps **one version per source** (the newest `indexed_at`
-or `reactivated_at`), before the reranker. The context header carries `effective from D` and the generator adds
+or `reactivated_at`), before the reranker. Every chunk says which rung found it (16 September 2026): `found_by`
+is `vector` for an id `find_neighbors` returned and `firestore` for a row Firestore's own index returned - chosen
+(`RETRIEVAL_BACKEND=firestore`, a tenant's pin) or fallen into (`vector_search_fallback`, the same stamp). The
+answer carries the count as `stages.vector_chunks` beside `stages.retrieval_backend`, the backend chosen for that
+request; `usage_row` carries the same. A deployment on `vector` whose answers say `vector_chunks: 0` is answering
+from the rung beneath - which is what `make smoke` now refuses to pass. The context header carries `effective from D` and the generator adds
 the dated rule only when a packed source has a date; the SSE citation event carries `effective_from`. The
 cache: `generate_config_kwargs()` compares the record's `corpus_fingerprint` with `ledger/{tenant}` in one read and
 runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus that changed.
@@ -153,6 +158,9 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
 | Which store answers a tenant | `make tenant-backend TENANT= RETRIEVAL_BACKEND=vector\|firestore\|rag_engine\|vertex_search\|default` (`make up` pins acme to the corpus and zeta to the data store) | `retrieval_backend=` on the tenant's row; from the next question the API serves from it - unless the tenant's `data_region` is `in`, when the row says `policy_fallback=1` and the kit's index answered |
 | The graph after a reindex | `make graph TENANT=` | `graph_built` with nodes and edges; only chunks whose `chunk_hash` changed are re-extracted (`graph_extractions/`), the rest is cached |
 | Many documents changed | `make ingest-corpus`, `make reconcile APPLY=1` | per-source counts; `reconcile_done` with `drift` 0 the night after |
+| Is the ANN tier holding the corpus? | `make vector-status` (`make wait-vectors WANT=200` to block until it is) | the index's own `vectorsCount` and the endpoint's deployed index; 0 right after `make up` is correct - vector.tf creates the index empty, the worker fills it |
+| The tier is empty and Firestore is not | `make backfill-vectors APPLY=1` (`TENANT_ONLY=` one tenant; without `APPLY=1` it counts) | `backfill_vectors` with the datapoints streamed up from the rows' own embeddings, nothing embedded - a worker deployed before the index existed, or an apply that lost its index |
+| Did the index answer, or the rung beneath it? | any `/v1/query`: `stages.retrieval_backend` and `stages.vector_chunks`; `make smoke` | `vector_chunks > 0` on a `vector` request is the index; 0 is the Firestore rung and one `vector_search_fallback` line in the log |
 | Which version is live? | `make sources TENANT_ONLY=acme`, the UI's Documents page, `GET /v1/sources?tenant_id=` | every source's version, generation, counts, dates, the fingerprint |
 | Is the cache current? | `make cache CACHE_OP=show` | *current*, or *STALE* with both fingerprints |
 | A lane without the TTL policy | `make purge` (prints), `make purge APPLY=1` | the rows the policy would have removed; on a lane with the policy, nothing |

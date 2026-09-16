@@ -177,6 +177,38 @@ def reupsert(index_name: str, db: firestore.Client, tenant_id: str, gcs_uri: str
     return len(points)
 
 
+def backfill(index_name: str, db: firestore.Client, tenant_id: str | None = None,
+             chunks_collection: str = "chunks", batch_size: int = 100) -> int:
+    """Every CURRENT chunk's stored embedding into the ANN tier (16 September 2026).
+
+    reupsert() is the undo's half: one document, by doc_key. This is the tier's half of a repair -
+    the state where Firestore holds the corpus and the index holds nothing, which is what a worker
+    deployed without VECTOR_INDEX_NAME leaves behind, and what a first apply that lost its index
+    leaves behind after the second one succeeds (make backfill-vectors).
+
+    Nothing is embedded: the rows carry their vectors already (mirror_to_firestore stores them for
+    the chaos rung). The restricts are to_datapoints()'s, so a backfilled datapoint is indistinguishable
+    from one the worker wrote. Streamed in batches - upsert_datapoints takes a bounded list.
+    Returns the datapoints upserted."""
+    query = db.collection(chunks_collection).where("current", "==", True)
+    if tenant_id:
+        query = query.where("tenant_id", "==", tenant_id)
+    points, total = [], 0
+    for snap in query.stream():
+        d = snap.to_dict() or {}
+        if d.get("embedding") is None:
+            continue
+        points.append(IndexDatapoint(
+            datapoint_id=snap.id, feature_vector=list(d["embedding"]),
+            restricts=_restricts(d.get("tenant_id") or (tenant_id or ""), d.get("kind") or "text",
+                                 d.get("doc_type") or "unknown")))
+        if len(points) >= batch_size:
+            upsert(index_name, points); total += len(points); points = []
+    if points:
+        upsert(index_name, points); total += len(points)
+    return total
+
+
 def mirror_to_firestore(db: firestore.Client, doc, chunks: list[dict],
                         vectors: list[list[float]], staged: bool = False, stage_expire_at=None) -> None:
     """The payload store, and the chaos fallback.

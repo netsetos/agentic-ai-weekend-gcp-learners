@@ -191,7 +191,7 @@ SCRIPTS    = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-12.
         release-candidate record-candidate promote rollback smoke-all usage ingest-one poison dlq down-services \
         reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex \
         batch queued batch-job graph managed-status rag-corpus rag-engine-enable tenant-policy tenant-backend \
-        managed-stores managed-stores-down
+        managed-stores managed-stores-down vector-status wait-vectors backfill-vectors
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -259,7 +259,7 @@ adopt-firestore: guard-project
 up: guard-project extract adopt-firestore
 	cd $(TF_DIR) && $(TF_INIT) && \
 	  terraform apply -input=false -auto-approve $(TF_VARS)
-	$(MAKE) drift secrets build deploy-services wait-index roster managed-stores bq-views
+	$(MAKE) drift secrets build deploy-services wait-index roster managed-stores bq-views vector-status
 
 # After an apply, a plan should be EMPTY. A resource that is still "to be replaced" is one the
 # provider reads back differently from how it was written - which is how both vector indexes
@@ -370,6 +370,45 @@ wait-index: guard-project
 	while gcloud firestore indexes composite list --project=$(PROJECT) \
 	        --format='value(state)' | grep -q CREATING; do sleep 15; done; \
 	echo ">> indexes READY"
+
+# ---------- The ANN tier (16 September 2026): what it holds, and the proof ----------
+# `make up` returns with the index created and EMPTY - correct, vector.tf names no batch input and
+# the worker fills it - so this is the line to run after make ingest-corpus, and the line to run
+# before claiming a Vector Search demonstration. vectorsCount is the index's own number; a streamed
+# upsert takes a few minutes to appear in it. The answer's stages.vector_chunks is the other half
+# of the proof: 0 while stages.retrieval_backend is `vector` means the Firestore rung answered.
+vector-status: guard-project
+	@IDX=$$(cd $(TF_DIR) && terraform output -raw vector_index_name 2>/dev/null); \
+	if [ -z "$$IDX" ]; then echo ">> no vector_index_name in the state: vector.tf is not applied"; exit 0; fi; \
+	gcloud ai indexes describe $$(basename $$IDX) --region=$(REGION) --project=$(PROJECT) \
+	  --format='yaml(displayName,indexStats.vectorsCount,indexStats.shardsCount,indexUpdateMethod)'; \
+	gcloud ai index-endpoints describe \
+	  $$(basename $$(cd $(TF_DIR) && terraform output -raw vector_index_endpoint)) \
+	  --region=$(REGION) --project=$(PROJECT) \
+	  --format='yaml(displayName,deployedIndexes[].id,deployedIndexes[].indexSyncTime)'
+
+# Block until the tier holds vectors, or say why not. WANT= the floor (default 1); 20 minutes at most.
+wait-vectors: guard-project
+	@IDX=$$(cd $(TF_DIR) && terraform output -raw vector_index_name); WANT=$${WANT:-1}; N=0; \
+	echo ">> waiting for >= $$WANT datapoints in $$(basename $$IDX)"; \
+	for i in $$(seq 1 60); do \
+	  N=$$(gcloud ai indexes describe $$(basename $$IDX) --region=$(REGION) --project=$(PROJECT) \
+	        --format='value(indexStats.vectorsCount)' 2>/dev/null); N=$${N:-0}; \
+	  if [ "$$N" -ge "$$WANT" ]; then echo ">> $$N datapoints"; exit 0; fi; \
+	  sleep 20; done; \
+	echo ">> still $$N datapoints after 20 min. Either the worker never upserted (documind-ingest logs: ingest_ok,"; \
+	echo ">> and VECTOR_INDEX_NAME on the service), or the corpus never landed (make ingest-corpus)."; \
+	echo ">> make backfill-vectors APPLY=1 fills the tier from the rows Firestore already holds."; exit 1
+
+# The ANN tier from the rows. Firestore holds every embedding - that is what the chaos rung reads - so a
+# tier that is empty when the corpus is not costs one pass over the rows and no model call. The state
+# this repairs: a worker deployed before vector.tf existed, or an apply that lost its index and succeeded
+# on the second run. Prints the count; APPLY=1 acts. TENANT_ONLY= one tenant.
+backfill-vectors: guard-project
+	PYTHONPATH=.:services/ingest GOOGLE_CLOUD_PROJECT=$(PROJECT) \
+	VECTOR_INDEX_NAME=$$(cd $(TF_DIR) && terraform output -raw vector_index_name) \
+	  $(PY) services/ingest/reconcile.py --project $(PROJECT) --backfill-vectors \
+	  $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
 
 # The roster is the tenancy boundary the surfaces enforce (shared/tenancy.py): a verified
 # person on no roster is a 403. Needs google-cloud-firestore locally

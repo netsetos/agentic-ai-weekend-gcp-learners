@@ -111,6 +111,18 @@ quota override, whose metric names are unverified (an unknown one fails the appl
 whole has not yet been applied to a live project: the lean lane ran live from 6 September, and the
 first `make up` of the one shape is the first live test of the rest.
 
+**The ANN tier starts empty, on purpose (16 September 2026).** `vector.tf` names no `contents_delta_uri`:
+that field is the *batch* ingest input, read once at create time, and the kit has no batch writer - the
+worker's `upsert_datapoints` is the only way in. Naming a folder of a bucket the same apply creates meant
+an empty folder, and CreateIndex refuses one; the first from-blank apply lost its index that way. So
+`make up` ends with `make vector-status` - the index's own `vectorsCount`, 0 until `make ingest-corpus`
+has run - and `make wait-vectors WANT=200` blocks until the corpus is in. Every answer says which rung
+served it: `stages.retrieval_backend` is the backend chosen for that request, `stages.vector_chunks` the
+index's share of the pool, and each citation's chunk carries `found_by: vector | firestore`. `make smoke`
+fails when a deployment on `vector` answered from the Firestore rung. If the tier is empty and Firestore
+is not - a worker deployed before the index existed - `make backfill-vectors APPLY=1` streams every
+current row's stored embedding up, no model call.
+
 Since Modules 7 and 8 joined the lane (September 2026) `make up` also deploys the agent
 surfaces: `documind-mcp` (7.2, the lane's tools over MCP with the kit's identity rules),
 `documind-chat` (12.8, the four brains of 8.7 behind one `/v1/chat`) and `documind-agent`

@@ -205,6 +205,8 @@ def main() -> int:
     ap.add_argument("--tenant", help="one tenant prefix only")
     ap.add_argument("--apply", action="store_true", help="act; the default prints the plan")
     ap.add_argument("--backfill", action="store_true", help="chunks and documents written before the ledger")
+    ap.add_argument("--backfill-vectors", action="store_true",
+                    help="every current chunk's stored embedding into the Vector Search index (VECTOR_INDEX_NAME)")
     ap.add_argument("--retire", help="a gs:// URI (or tenant/name) to withdraw by hand: a tombstone the walk honours")
     ap.add_argument("--restore", help="a gs:// URI (or tenant/name) withdrawn by --retire: clear the tombstone, re-ingest")
     ap.add_argument("--report", action="store_true", help="the versions view: sources/ and the corpus fingerprint")
@@ -288,6 +290,28 @@ def main() -> int:
                           "retired": len(rows), "applied": a.apply,
                           "note": "the TTL policy on chunks.expire_at (firestore_indexes.tf) deletes these on its own within a day; "
                                   "this is the manual twin for a lane that has not applied it"}))
+        return 0
+
+    if a.backfill_vectors:
+        # The ANN tier, from the rows (16 September 2026). Nothing is embedded and nothing is read from the
+        # bucket: this is Firestore's copy of the vectors going up to the index that should already hold them.
+        # The state it repairs: a worker deployed before vector.tf existed, or an apply that lost its index.
+        from indexer import backfill
+        index_name = os.environ.get("VECTOR_INDEX_NAME", "")
+        if not index_name:
+            print("VECTOR_INDEX_NAME is empty: no index to fill "
+                  "(terraform -chdir=terraform output -raw vector_index_name)")
+            return 2
+        if not a.apply:
+            q = db.collection("chunks").where("current", "==", True)
+            if a.tenant:
+                q = q.where("tenant_id", "==", a.tenant)
+            print(json.dumps({"event": "backfill_vectors_plan", "index": index_name, "tenant": a.tenant or "*",
+                              "current_chunks": sum(1 for _ in q.select(["tenant_id"]).stream())}))
+            return 0
+        n = backfill(index_name, db, a.tenant)
+        print(json.dumps({"event": "backfill_vectors", "index": index_name, "tenant": a.tenant or "*",
+                          "datapoints": n}))
         return 0
 
     if a.retire:

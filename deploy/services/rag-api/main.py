@@ -374,6 +374,7 @@ def query(req: QueryRequest, user=Depends(verify_iap)):
     guard = screen_prompt(req.query, req.tenant_id)       # 12.6: before retrieval, or not at all (ARMOR=off)
     stages: dict = {}
     rbackend, stages["policy_fallback"] = retrieval_backend_for(req.tenant_id, rbackend)   # the tenant's data_region, per request
+    stages["retrieval_backend"] = rbackend               # the backend chosen for THIS request (16 September 2026): the row carried it, the answer did not
     fingerprint = _fingerprint(req.tenant_id) if settings.semantic_cache == "on" else ""
     with stage(stages, "retrieve"):
         qvec = embed_query(req.query)                     # once: the answer cache and the retrieval share it
@@ -382,6 +383,7 @@ def query(req: QueryRequest, user=Depends(verify_iap)):
     stages["pool"] = len(chunks)                          # what the reranker sees: TOP_K_RETRIEVE, as served
     stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")   # 4.6's walk, counted
     stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") in MANAGED_BACKENDS)   # P9.4 / R4: the store's share of the pool
+    stages["vector_chunks"] = sum(1 for c in chunks if c.get("found_by") == "vector")   # the ANN tier's share (16 September 2026): 0 while retrieval_backend is `vector` means the Firestore rung answered
     if hit:
         ans = hit                                         # served from answer_cache: no reranker, no model
         stages["rerank_ms"] = stages["generate_ms"] = 0
@@ -431,6 +433,7 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
         # no place to hold a span's context, and the trace already carries the request's own span.
         stages: dict = {}
         rbackend, stages["policy_fallback"] = retrieval_backend_for(req.tenant_id, rbackend)
+        stages["retrieval_backend"] = rbackend
         fingerprint = _fingerprint(req.tenant_id) if settings.semantic_cache == "on" else ""
         tick = time.perf_counter()
         qvec = embed_query(req.query)
@@ -439,6 +442,7 @@ def stream(req: QueryRequest, user=Depends(verify_iap)):
         stages["retrieve_ms"], stages["pool"] = _ms(tick), len(chunks)
         stages["graph_chunks"] = sum(1 for c in chunks if c.get("found_by") == "graph")
         stages["managed_chunks"] = sum(1 for c in chunks if c.get("found_by") in MANAGED_BACKENDS)
+        stages["vector_chunks"] = sum(1 for c in chunks if c.get("found_by") == "vector")
         tick = time.perf_counter()
         if chunks:                                   # a hit brought none; an empty pool has nothing to rank
             chunks = rerank(req.query, chunks, req.top_k, tenant_id=req.tenant_id)
