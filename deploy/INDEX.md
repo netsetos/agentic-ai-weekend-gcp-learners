@@ -205,7 +205,7 @@ Lesson ids ending in `p` are practice labs.
 | `shared/pii.py` | code | - | 10.1,10.5,12.3,12.5,12.6,12.8,5.5,9.6 |
 | `shared/profile.py` | code | - | 10.3,11.3,12.1,12.3,12.4,12.7,12.8,3.2p,6.4,7.1,8.5,9.4 |
 | `shared/requirements.txt` | code | - | 12.7 |
-| `smoke/preflight.sh` | code | - | 12.8 |
+| `smoke/preflight.sh` | code | - | 12.8,4.8 |
 | `smoke/smoke.py` | code | - | 12.1,12.2,12.3,12.7,12.8,4.8,7.1,7.2,8.4 |
 | `smoke/smoke_agent.py` | code | - | 12.8,8.4 |
 | `smoke/smoke_chat.py` | code | - | 12.8 |
