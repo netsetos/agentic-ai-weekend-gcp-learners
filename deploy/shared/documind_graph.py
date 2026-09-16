@@ -184,10 +184,11 @@ class SpannerGraph:
                 param_types={"tenant": pt.STRING, "question": pt.STRING, "names": pt.Array(pt.STRING), "limit": pt.INT64})
             return [{"node_id": r[0], "name": r[1], "kind": r[2]} for r in rows]
 
-    def seed_by_vector(self, vec: list, tenant_id: str = TENANT, k: int = 5, max_distance: float = 0.4) -> list:
+    def seed_by_vector(self, vec: list, tenant_id: str = TENANT, k: int = 5, max_distance: float | None = 0.4) -> list:
         """The nodes whose names mean what the question means: COSINE_DISTANCE (0 identical, 2 opposite) over the
         tenant's stored vectors, the k nearest, and none farther than max_distance - so a question about nothing in
-        the graph seeds nothing, and `auto` stays on the dense path."""
+        the graph seeds nothing, and `auto` stays on the dense path. max_distance=None returns the k nearest whatever
+        their distance: what graph.py --ask prints, so the threshold is set from numbers rather than guessed."""
         pt = self._pt()
         with self.database.snapshot() as snapshot:
             rows = snapshot.execute_sql(
@@ -195,7 +196,7 @@ class SpannerGraph:
                 params={"tenant": tenant_id, "q": [float(x) for x in vec], "k": k},
                 param_types={"tenant": pt.STRING, "q": pt.Array(pt.FLOAT32), "k": pt.INT64})
             return [{"node_id": r[0], "name": r[1], "kind": r[2], "distance": float(r[3])}
-                    for r in rows if float(r[3]) <= max_distance]
+                    for r in rows if max_distance is None or float(r[3]) <= max_distance]
 
     def expand(self, seed_ids: list, tenant_id: str = TENANT, hops: int = 1, cap: int = 20) -> list:
         """Cell 23's GQL: one statement for one or two hops, undirected, inside the tenant, capped - plus the seeds'
@@ -242,7 +243,7 @@ def choose_mode(question: str, seeds: list) -> str:
 
 
 def walk(store, question: str, tenant_id: str, hops: int = 1, cap: int = 20, vec: list | None = None,
-         k: int = 5, max_distance: float = 0.4) -> dict:
+         k: int = 5, max_distance: float | None = 0.4) -> dict:
     """One question in, on any store (16 September 2026): seeds by meaning when a question vector is given and the
     store can (SpannerGraph.seed_by_vector), by containment otherwise; then the walk; then the chunk ids."""
     if vec is not None and hasattr(store, "seed_by_vector"):

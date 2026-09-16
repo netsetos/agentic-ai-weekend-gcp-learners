@@ -192,6 +192,9 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="count the chunks; extract nothing")
     ap.add_argument("--ask", help="walk the graph for one question and print what the API would fetch")
     ap.add_argument("--hops", type=int, default=1)
+    ap.add_argument("--seed-k", type=int, default=5, help="--ask on spanner: how many nearest names to consider")
+    ap.add_argument("--seed-distance", type=float, default=0.4,
+                    help="--ask on spanner: the largest cosine distance a name may have and still seed the walk (the API's GRAPH_SEED_DISTANCE)")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     from google.cloud import firestore
@@ -218,10 +221,16 @@ def main() -> int:
 
     if args.ask:
         if args.backend == "spanner":
-            # By meaning: the question's embedding against the names', the same model and task type the build used.
-            r = walk(spanner_store(), args.ask, args.tenant, hops=args.hops, vec=embedder()([args.ask])[0])
-            print(json.dumps({"question": args.ask, "backend": "spanner", "seeded_by": "meaning",
-                              "seeds": [{"name": x["name"], "distance": round(x["distance"], 3)} for x in r["seeds"]],
+            # By meaning: the question's embedding against the names', the same model and task type the build used. The
+            # k nearest are printed whatever their distance, with whether each passed the threshold - so the threshold
+            # the API runs with (GRAPH_SEED_DISTANCE) is set from these numbers, not guessed.
+            store, vec = spanner_store(), embedder()([args.ask])[0]
+            nearest = store.seed_by_vector(vec, args.tenant, k=args.seed_k, max_distance=None)
+            r = walk(store, args.ask, args.tenant, hops=args.hops, vec=vec, k=args.seed_k, max_distance=args.seed_distance)
+            print(json.dumps({"question": args.ask, "backend": "spanner", "seeded_by": "meaning", "seed_distance": args.seed_distance,
+                              "nearest": [{"name": x["name"], "kind": x["kind"], "distance": round(x["distance"], 3),
+                                           "seeded": x["distance"] <= args.seed_distance} for x in nearest],
+                              "seeds": [x["name"] for x in r["seeds"]],
                               "nodes": [n["name"] for n in r["nodes"]], "chunk_ids": r["chunk_ids"]}, indent=1))
             return 0
         r = graph_chunk_ids(db, args.ask, args.tenant, hops=args.hops)
