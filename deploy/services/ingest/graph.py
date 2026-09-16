@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Build a tenant's knowledge graph from its current chunks - lesson 4.6, on the lane (13 September 2026).
 
-    python graph.py --project P --tenant acme [--limit 200] [--source hr_policy_2026.md] [--rebuild] [--dry-run] [--ask "Which Acts ..."]
+    python graph.py --project P --tenant acme [--backend firestore|spanner] [--limit 200] [--source hr_policy_2026.md]
+                    [--rebuild] [--dry-run] [--ask "Which Acts ..."]
 
 4.6's pipeline, as a tool: every current text chunk of the tenant (the handbook's GEN- boilerplate skipped) through
 gemini-3.1-flash-lite with the lesson's GraphExtraction schema and system prompt - entities and relations STATED in
@@ -15,6 +16,10 @@ hash, so a rerun pays for new or changed chunks only. --rebuild erases the tenan
 substring of source_uri, 16 September 2026): reading order sorts the Acts before the handbook, so a demonstration
 that wants the handbook's entities names the handbook rather than guessing a limit. --ask walks the graph for one question and
 prints the seeds, the nodes and the chunk ids the API would put in front of its dense pool (RETRIEVAL_GRAPH=on|auto).
+--backend spanner (16 September 2026) writes the same graph to Spanner Graph (shared/documind_graph.SpannerGraph, the
+DDL in spanner.tf; SPANNER_INSTANCE / SPANNER_DATABASE name it) with each canonical name's embedding beside the node,
+and --ask then seeds BY MEANING - the question's embedding against the names' - so the question need not contain a
+stored name; on Firestore --ask seeds by containment, as the lesson does.
 Needs, on Cloud Shell: pip install --user google-genai==2.22.0 google-cloud-firestore==2.30.0 numpy.
 """
 from __future__ import annotations
@@ -181,6 +186,8 @@ def main() -> int:
     ap.add_argument("--tenant", default="acme")
     ap.add_argument("--limit", type=int, help="chunks to extract, in reading order (the bill)")
     ap.add_argument("--source", help="only the chunks whose source_uri contains this - one document's graph")
+    ap.add_argument("--backend", default=os.environ.get("GRAPH_BACKEND", "firestore"), choices=("firestore", "spanner"),
+                    help="where the graph lives: Firestore (the lesson's default) or Spanner Graph, which also seeds by meaning")
     ap.add_argument("--rebuild", action="store_true", help="erase the tenant's graph first")
     ap.add_argument("--dry-run", action="store_true", help="count the chunks; extract nothing")
     ap.add_argument("--ask", help="walk the graph for one question and print what the API would fetch")
@@ -188,11 +195,38 @@ def main() -> int:
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
     from google.cloud import firestore
-    from shared.documind_graph import FirestoreGraph, graph_chunk_ids
+    from shared.documind_graph import FirestoreGraph, SpannerGraph, graph_chunk_ids, walk
     db = firestore.Client(project=args.project)
+    def spanner_store():
+        from google.cloud import spanner
+        inst = os.environ.get("SPANNER_INSTANCE", "documind-graph"); dbname = os.environ.get("SPANNER_DATABASE", "documind")
+        return SpannerGraph(spanner.Client(project=args.project).instance(inst).database(dbname))
+
+    def embedder():
+        from google import genai
+        from google.genai import types
+        emb = genai.Client(enterprise=True, project=args.project, location=os.environ.get("EMBED_LOCATION", "us-central1"))
+
+        def embed(names: list) -> list:
+            vecs = []
+            for i in range(0, len(names), 250):
+                r = emb.models.embed_content(model=EMBED_MODEL, contents=names[i:i + 250],
+                                             config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY", output_dimensionality=768))
+                vecs.extend(e.values for e in r.embeddings)
+            return vecs
+        return embed
+
     if args.ask:
+        if args.backend == "spanner":
+            # By meaning: the question's embedding against the names', the same model and task type the build used.
+            r = walk(spanner_store(), args.ask, args.tenant, hops=args.hops, vec=embedder()([args.ask])[0])
+            print(json.dumps({"question": args.ask, "backend": "spanner", "seeded_by": "meaning",
+                              "seeds": [{"name": x["name"], "distance": round(x["distance"], 3)} for x in r["seeds"]],
+                              "nodes": [n["name"] for n in r["nodes"]], "chunk_ids": r["chunk_ids"]}, indent=1))
+            return 0
         r = graph_chunk_ids(db, args.ask, args.tenant, hops=args.hops)
-        print(json.dumps({"question": args.ask, "seeds": [s["name"] for s in r["seeds"]],
+        print(json.dumps({"question": args.ask, "backend": "firestore", "seeded_by": "containment",
+                          "seeds": [x["name"] for x in r["seeds"]],
                           "nodes": [n["name"] for n in r["nodes"]], "chunk_ids": r["chunk_ids"]}, indent=1))
         return 0
     chunks = load_chunks(db, args.tenant, args.limit, args.source)
@@ -201,27 +235,24 @@ def main() -> int:
     if args.dry_run:
         return 0
     from google import genai
-    from google.genai import types
     gen = genai.Client(enterprise=True, project=args.project, location="global")       # generation: global only
-    emb = genai.Client(enterprise=True, project=args.project, location=os.environ.get("EMBED_LOCATION", "us-central1"))
-
-    def embed(names: list) -> list:
-        vecs = []
-        for i in range(0, len(names), 250):
-            r = emb.models.embed_content(model=EMBED_MODEL, contents=names[i:i + 250],
-                                         config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY", output_dimensionality=768))
-            vecs.extend(e.values for e in r.embeddings)
-        return vecs
+    embed = embedder()
 
     extractions = extract_all(db, args.tenant, chunks, gen)
     canon_of = resolve_entities([e.name for x in extractions for e in x["graph"].entities], embed)
     nodes, edges = build_graph(extractions, canon_of)
-    graph = FirestoreGraph(db)
+    graph = spanner_store() if args.backend == "spanner" else FirestoreGraph(db)
     if args.rebuild:
         graph.delete_tenant(args.tenant)
-    graph.load(nodes, edges, args.tenant)
-    log.info(json.dumps({"event": "graph_built", "tenant": args.tenant, "chunks": len(chunks), "surface_forms": len(canon_of),
-                         "nodes": len(nodes), "edges": len(edges)}))
+    if args.backend == "spanner":
+        # One vector per canonical name, beside the node: what seed_by_vector ranks. A dozen names is one call.
+        ids = list(nodes)
+        vecs = embed([nodes[nid]["name"] for nid in ids]) if ids else []
+        graph.load(nodes, edges, args.tenant, embeddings=dict(zip(ids, vecs)))
+    else:
+        graph.load(nodes, edges, args.tenant)
+    log.info(json.dumps({"event": "graph_built", "tenant": args.tenant, "backend": args.backend, "chunks": len(chunks),
+                         "surface_forms": len(canon_of), "nodes": len(nodes), "edges": len(edges)}))
     return 0
 
 

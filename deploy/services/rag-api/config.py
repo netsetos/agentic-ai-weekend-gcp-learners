@@ -5,9 +5,10 @@ RETRIEVAL_BACKENDS = ("vector", "firestore", "rag_engine", "vertex_search")   # 
 MANAGED_BACKENDS = ("rag_engine", "vertex_search")   # embed and search on their own terms, outside India: a tenant's data_region decides per request
 RETRIEVAL_MODES = ("dense", "hybrid")
 GRAPH_MODES = ("off", "on", "auto")          # 4.6's graph on the lane (13 September 2026, shared/documind_graph.py)
+GRAPH_BACKENDS = ("firestore", "spanner")    # where the graph lives (16 September 2026): Spanner seeds the walk by meaning
 
 
-def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
+def check_retrieval_modes(backend: str, mode: str, graph: str = "off", graph_backend: str = "firestore") -> None:
     """RETRIEVAL_MODE against RETRIEVAL_BACKEND, at startup (12 September 2026, R06). Hybrid is Vector Search's
     HybridQuery (4.5's hybrid.py); Firestore's vector index takes one dense vector and nothing else, so with the
     Firestore backend RETRIEVAL_MODE=hybrid ran dense while every usage row and /version said hybrid. A service that cannot do
@@ -23,6 +24,9 @@ def check_retrieval_modes(backend: str, mode: str, graph: str = "off") -> None:
     if graph not in GRAPH_MODES:
         raise ValueError(f"RETRIEVAL_GRAPH={graph!r}: one of {'|'.join(GRAPH_MODES)} - off touches nothing, on walks the tenant's "
                          "graph for every question, auto only for a relational question with a seed entity (4.6's choose_mode)")
+    if graph_backend not in GRAPH_BACKENDS:
+        raise ValueError(f"GRAPH_BACKEND={graph_backend!r}: one of {'|'.join(GRAPH_BACKENDS)} - firestore is 4.6's store beside the "
+                         "chunks; spanner is spanner.tf's Spanner Graph, which seeds by meaning (SPANNER_INSTANCE / SPANNER_DATABASE)")
     if backend in MANAGED_BACKENDS and mode == "hybrid":
         raise ValueError(f"RETRIEVAL_MODE=hybrid needs RETRIEVAL_BACKEND=vector: {backend} embeds and searches on its own "
                          "terms (a managed store has no sparse leg to fuse). Set RETRIEVAL_MODE=dense.")
@@ -136,6 +140,15 @@ class Settings(BaseSettings):
     retrieval_graph: str = Field("off", alias="RETRIEVAL_GRAPH")
     graph_hops: int = Field(1, alias="GRAPH_HOPS")          # 1 or 2: deeper walks return the whole tenant (4.6)
     graph_cap: int = Field(20, alias="GRAPH_CAP")           # nodes per walk, the budget 4.5 defends
+    # Where the graph lives (16 September 2026): firestore (graph_nodes / graph_edges beside the chunks, seeded by a
+    # name the question contains) or spanner (spanner.tf's DocuMindGraph, seeded BY MEANING: the question's embedding
+    # against the names' - GRAPH_SEED_K nearest, none farther than GRAPH_SEED_DISTANCE in cosine distance, so a
+    # question about nothing in the graph seeds nothing and `auto` stays dense). make graph GRAPH_BACKEND= builds either.
+    graph_backend: str = Field("firestore", alias="GRAPH_BACKEND")
+    spanner_instance: str = Field("documind-graph", alias="SPANNER_INSTANCE")
+    spanner_database: str = Field("documind", alias="SPANNER_DATABASE")
+    graph_seed_k: int = Field(5, alias="GRAPH_SEED_K")
+    graph_seed_distance: float = Field(0.4, alias="GRAPH_SEED_DISTANCE")   # unverified on the real corpus: judge it on a candidate
 
     # USD per 1M tokens, gemini-3.6-flash standard. 12.6 moves this to a
     # BigQuery model_prices table so a rate change is not a redeploy.
@@ -147,7 +160,7 @@ class Settings(BaseSettings):
         # Refused here, at import, so a revision with an impossible pair never serves: the deploy fails with the
         # message above instead of a service that runs dense and reports hybrid. /version reports the mode that
         # passed this check - the effective one.
-        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph)
+        check_retrieval_modes(self.retrieval_backend, self.retrieval_mode, self.retrieval_graph, self.graph_backend)
         return self
 
 settings = Settings()

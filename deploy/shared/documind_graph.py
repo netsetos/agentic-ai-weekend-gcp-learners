@@ -113,6 +113,121 @@ class FirestoreGraph:
 # --- graph store: end -----------------------------------------------------------
 
 
+# --- spanner graph: begin -------------------------------------------------------
+class SpannerGraph:
+    """4.6's Spanner Graph backend, on the lane (16 September 2026). The lesson's load, seed-by-containment, GQL walk
+    and key-range delete (cells 19, 21, 23, 37) with the database injected instead of a notebook global, over the
+    DDL spanner.tf declares: GraphNode keyed (tenant_id, node_id) with an `embedding` column, GraphEdge interleaved
+    in its source node ON DELETE CASCADE, the property graph DocuMindGraph with the edge label RELATES_TO.
+
+    And the one thing the Firestore rung cannot do: SEED BY MEANING. seed_by_vector() ranks the tenant's nodes by
+    COSINE_DISTANCE between their names' embeddings and the question's, so the question no longer has to contain
+    a stored name - "who signs off on a big purchase?" reaches the CFO. Exact distance over the tenant's rows: right
+    for a graph of thousands of nodes; the ANN index (CREATE VECTOR INDEX, APPROX_COSINE_DISTANCE) is the step for
+    millions and is deliberately not taken here. The tenant predicate is in every read. expand() returns the seeds
+    too, as FirestoreGraph.expand does - their chunks are the evidence most questions need. A tenant delete is one
+    key range on GraphNode; the interleave takes the edges with it in the same transaction."""
+
+    SEED_SQL = """SELECT node_id, name, kind FROM GraphNode
+               WHERE tenant_id = @tenant
+                 AND (STRPOS(@question, LOWER(name)) > 0
+                      OR EXISTS (SELECT 1 FROM UNNEST(@names) AS n WHERE STRPOS(LOWER(name), n) > 0))
+               ORDER BY LENGTH(name) DESC
+               LIMIT @limit"""
+    KNN_SQL = """SELECT node_id, name, kind, COSINE_DISTANCE(embedding, @q) AS d FROM GraphNode
+              WHERE tenant_id = @tenant AND embedding IS NOT NULL
+              ORDER BY d
+              LIMIT @k"""
+    ROWS_SQL = """SELECT node_id, name, kind, chunk_ids FROM GraphNode
+               WHERE tenant_id = @tenant AND node_id IN UNNEST(@ids)"""
+    EXPAND_GQL = """GRAPH DocuMindGraph
+    MATCH (a:GraphNode WHERE a.tenant_id = @tenant AND a.node_id IN UNNEST(@seeds))
+          -[e:RELATES_TO]-{1,%d}
+          (b:GraphNode WHERE b.tenant_id = @tenant)
+    RETURN DISTINCT b.node_id AS node_id, b.name AS name, b.kind AS kind, b.chunk_ids AS chunk_ids
+    LIMIT @cap"""
+
+    def __init__(self, database):
+        self.database = database
+
+    @staticmethod
+    def _pt():
+        from google.cloud.spanner_v1 import param_types
+        return param_types
+
+    def load(self, nodes: dict, edges: dict, tenant_id: str = TENANT, embeddings: dict | None = None) -> None:
+        """Idempotent: insert_or_update on the stable ids. `embeddings` maps node_id -> 768 floats (make graph
+        GRAPH_BACKEND=spanner embeds the canonical names); a node without one is stored and never seeded by meaning."""
+        from google.cloud.spanner_v1 import COMMIT_TIMESTAMP
+        embeddings = embeddings or {}
+        with self.database.batch() as batch:
+            batch.insert_or_update(
+                table="GraphNode",
+                columns=("tenant_id", "node_id", "kind", "name", "chunk_ids", "embedding", "updated_at"),
+                values=[(tenant_id, nid, n["kind"], n["name"], sorted(n["chunks"]),
+                         (list(embeddings[nid]) if nid in embeddings else None), COMMIT_TIMESTAMP)
+                        for nid, n in nodes.items()])
+            if edges:
+                batch.insert_or_update(
+                    table="GraphEdge",
+                    columns=("tenant_id", "node_id", "dst_id", "rel", "chunk_id", "confidence"),
+                    values=[(tenant_id, s, d, rel, v["chunk_id"], float(v["confidence"]))
+                            for (s, d, rel), v in edges.items()])
+
+    def seed(self, question: str, tenant_id: str = TENANT, limit: int = 5) -> list:
+        """Cell 21: the node's name inside the question, or a capitalised run of the question inside the name."""
+        pt = self._pt()
+        with self.database.snapshot() as snapshot:
+            rows = snapshot.execute_sql(
+                self.SEED_SQL,
+                params={"tenant": tenant_id, "question": question.lower(), "names": _candidate_names(question), "limit": limit},
+                param_types={"tenant": pt.STRING, "question": pt.STRING, "names": pt.Array(pt.STRING), "limit": pt.INT64})
+            return [{"node_id": r[0], "name": r[1], "kind": r[2]} for r in rows]
+
+    def seed_by_vector(self, vec: list, tenant_id: str = TENANT, k: int = 5, max_distance: float = 0.4) -> list:
+        """The nodes whose names mean what the question means: COSINE_DISTANCE (0 identical, 2 opposite) over the
+        tenant's stored vectors, the k nearest, and none farther than max_distance - so a question about nothing in
+        the graph seeds nothing, and `auto` stays on the dense path."""
+        pt = self._pt()
+        with self.database.snapshot() as snapshot:
+            rows = snapshot.execute_sql(
+                self.KNN_SQL,
+                params={"tenant": tenant_id, "q": [float(x) for x in vec], "k": k},
+                param_types={"tenant": pt.STRING, "q": pt.Array(pt.FLOAT32), "k": pt.INT64})
+            return [{"node_id": r[0], "name": r[1], "kind": r[2], "distance": float(r[3])}
+                    for r in rows if float(r[3]) <= max_distance]
+
+    def expand(self, seed_ids: list, tenant_id: str = TENANT, hops: int = 1, cap: int = 20) -> list:
+        """Cell 23's GQL: one statement for one or two hops, undirected, inside the tenant, capped - plus the seeds'
+        own rows first. hops is 1 or 2: deeper walks return the whole tenant, which blows the budget 4.5 defends."""
+        if hops not in (1, 2):
+            raise ValueError("hops must be 1 or 2 - deeper walks return the whole tenant")
+        if not seed_ids:
+            return []
+        pt = self._pt()
+        out, seen = [], set()
+        with self.database.snapshot() as snapshot:
+            for r in snapshot.execute_sql(
+                    self.ROWS_SQL, params={"tenant": tenant_id, "ids": list(seed_ids)},
+                    param_types={"tenant": pt.STRING, "ids": pt.Array(pt.STRING)}):
+                if r[0] not in seen:
+                    seen.add(r[0]); out.append({"node_id": r[0], "name": r[1], "kind": r[2], "chunk_ids": list(r[3] or [])})
+            for r in snapshot.execute_sql(
+                    self.EXPAND_GQL % hops, params={"tenant": tenant_id, "seeds": list(seed_ids), "cap": cap},
+                    param_types={"tenant": pt.STRING, "seeds": pt.Array(pt.STRING), "cap": pt.INT64}):
+                if r[0] not in seen:
+                    seen.add(r[0]); out.append({"node_id": r[0], "name": r[1], "kind": r[2], "chunk_ids": list(r[3] or [])})
+        return out[:cap]
+
+    def delete_tenant(self, tenant_id: str) -> None:
+        """Cell 37: one key range on GraphNode; the interleave cascades to GraphEdge in the same transaction."""
+        from google.cloud import spanner
+        from google.cloud.spanner_v1 import KeySet
+        with self.database.batch() as batch:
+            batch.delete("GraphNode", KeySet(ranges=[spanner.KeyRange(start_closed=[tenant_id], end_closed=[tenant_id])]))
+# --- spanner graph: end ---------------------------------------------------------
+
+
 # --- graph route: begin ---------------------------------------------------------
 def choose_mode(question: str, seeds: list) -> str:
     """auto: use the graph only when the question is relational AND we found a seed entity.
@@ -124,6 +239,20 @@ def choose_mode(question: str, seeds: list) -> str:
         r"supersed|replac|affect|impact|downstream|upstream)\b", question, re.I)
     return "graph" if (relational and seeds) else "vector"
 # --- graph route: end -----------------------------------------------------------
+
+
+def walk(store, question: str, tenant_id: str, hops: int = 1, cap: int = 20, vec: list | None = None,
+         k: int = 5, max_distance: float = 0.4) -> dict:
+    """One question in, on any store (16 September 2026): seeds by meaning when a question vector is given and the
+    store can (SpannerGraph.seed_by_vector), by containment otherwise; then the walk; then the chunk ids."""
+    if vec is not None and hasattr(store, "seed_by_vector"):
+        seeds = store.seed_by_vector(vec, tenant_id, k=k, max_distance=max_distance)
+    else:
+        seeds = store.seed(question, tenant_id)
+    if not seeds:
+        return {"seeds": [], "nodes": [], "chunk_ids": []}
+    nodes = store.expand([s["node_id"] for s in seeds], tenant_id, hops=hops, cap=cap)
+    return {"seeds": seeds, "nodes": nodes, "chunk_ids": sorted({cid for n in nodes for cid in n["chunk_ids"]})}
 
 
 def graph_chunk_ids(db, question: str, tenant_id: str, hops: int = 1, cap: int = 20) -> dict:

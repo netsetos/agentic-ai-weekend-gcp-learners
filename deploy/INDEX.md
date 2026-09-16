@@ -171,7 +171,7 @@ Lesson ids ending in `p` are practice labs.
 | `services/gemma-vllm/Dockerfile` | code | - | 11.2,12.7 |
 | `services/gemma-vllm/auth.py` | code | - | 11.2 |
 | `services/gemma-vllm/cloudbuild.yaml` | code | - | 11.1,11.1p,12.7 |
-| `services/gemma-vllm/documind.py` | code | - | 10.1p,10.4,11.2,11.2p,11.3p,12.1,12.1p,12.3,12.3p,12.4p,12.5,12.6,12.7,12.8,13.3,2.4,2.4p,4.6,6.4,7.1,7.3,7.3p,8.1p,8.1,8.2,8.3,8.3p,8.4,8.4p,8.6,8.7,9.6 |
+| `services/gemma-vllm/documind.py` | code | - | 10.1p,10.4,11.2,11.2p,11.3p,12.1,12.1p,12.2,12.3,12.3p,12.4p,12.5,12.6,12.7,12.8,13.3,2.4,2.4p,4.6,6.4,7.1,7.3,7.3p,8.1p,8.1,8.2,8.3,8.3p,8.4,8.4p,8.6,8.7,9.6 |
 | `services/gemma-vllm/logging_module.py` | code | - | 11.2,11.2p |
 | `services/gemma-vllm/main.py` | code | - | 11.2 |
 | `services/gemma-vllm/requirements.txt` | code | - | 11.2,12.7 |
@@ -218,7 +218,7 @@ Lesson ids ending in `p` are practice labs.
 | `terraform/gke.tf` | code | - | 11.5,12.1 |
 | `terraform/off.tf` | code | - | 12.1,12.3,12.8 |
 | `terraform/reconcile.tf` | code | - | 12.5 |
-| `terraform/spanner.tf` | code | - | 1.1p,1.1,12.1,4.6 |
+| `terraform/spanner.tf` | code | - | 1.1p,1.1,12.1,12.2,12.5,4.6 |
 | `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.2p,4.5,4.6,4.7 |
 
 ## E. unreferenced by any notebook (42)

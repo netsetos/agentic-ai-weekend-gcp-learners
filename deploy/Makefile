@@ -104,6 +104,12 @@ RECONCILE_JOB   ?= false
 # API (shared/documind_graph.py; make graph builds it): both off until asked for, the graph judged on a candidate first
 BATCH_JOB       ?= false
 RETRIEVAL_GRAPH ?= off
+# Where the graph lives (16 September 2026): firestore (beside the chunks, seeded by a name the question contains) or
+# spanner (spanner.tf's DocuMindGraph, seeded BY MEANING - the question's embedding against the node names').
+# make graph GRAPH_BACKEND=spanner builds it there; make candidate GRAPH_BACKEND=spanner RETRIEVAL_GRAPH=auto judges it.
+GRAPH_BACKEND    ?= firestore
+SPANNER_INSTANCE ?= documind-graph
+SPANNER_DATABASE ?= documind
 # P9 (13 September 2026, managed-retrieval-plan-2026-09-13.md): the managed mirror - the ledger's current versions copied
 # into a RAG Engine corpus (4.3) and / or a Vertex AI Search data store (4.4) per tenant, for the rag_engine and
 # vertex_search backends. MANAGED_MIRROR is the worker's, the batch job's and the walk's switch (off | rag_engine |
@@ -337,6 +343,7 @@ deploy-services: guard-project
 	  CHAT_SQL_FLAGS="$$CHAT_SQL_FLAGS" CHAT_EXTRA_ENV="$$CHAT_EXTRA_ENV" \
 	  GENERATOR_MODEL=$(GENERATOR_MODEL) RAG_MODEL_BASE=$(RAG_MODEL_BASE) ROUTING=$(ROUTING) MODEL_BACKEND=$(MODEL_BACKEND) ARMOR=$(ARMOR) SEMANTIC_CACHE=$(SEMANTIC_CACHE) \
   RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY) RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH) \
+	  GRAPH_BACKEND=$(GRAPH_BACKEND) SPANNER_INSTANCE=$(SPANNER_INSTANCE) SPANNER_DATABASE=$(SPANNER_DATABASE) \
 	  BATCH_JOB_NAME=$(if $(filter true,$(BATCH_JOB)),documind-ingest-batch,) \
 	  MANAGED_MIRROR=$(MANAGED_MIRROR) RAG_LOCATION=$(RAG_LOCATION) \
 	  RETENTION_DAYS=$$RETENTION_DAYS EMBEDDING_MODEL=$$EMBEDDING_MODEL EMBEDDING_VERSION=$$EMBEDDING_VERSION \
@@ -564,7 +571,7 @@ tune: guard-project
 #   make eval-live API=https://candidate---documind-api-NUMBER.us-central1.run.app
 candidate: guard-project
 	gcloud run services update documind-api --region $(REGION) --project $(PROJECT) --no-traffic --tag candidate \
-	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)$(if $(RETRIEVAL_BACKEND),|RETRIEVAL_BACKEND=$(RETRIEVAL_BACKEND)|RAG_LOCATION=$(RAG_LOCATION),)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
+	  --update-env-vars "^|^GENERATOR_MODEL=$(GENERATOR_MODEL)|RAG_MODEL_BASE=$(RAG_MODEL_BASE)|ROUTING=$(ROUTING)|MODEL_BACKEND=$(MODEL_BACKEND)|ARMOR=$(ARMOR)|SEMANTIC_CACHE=$(SEMANTIC_CACHE)|RETRIEVAL_CURRENT_ONLY=$(RETRIEVAL_CURRENT_ONLY)|RETRIEVAL_GRAPH=$(RETRIEVAL_GRAPH)|GRAPH_BACKEND=$(GRAPH_BACKEND)|SPANNER_INSTANCE=$(SPANNER_INSTANCE)|SPANNER_DATABASE=$(SPANNER_DATABASE)$(if $(RETRIEVAL_BACKEND),|RETRIEVAL_BACKEND=$(RETRIEVAL_BACKEND)|RAG_LOCATION=$(RAG_LOCATION),)$(if $(GENERATOR_LOCATION),|GENERATOR_LOCATION=$(GENERATOR_LOCATION),)" $(if $(GENERATOR_LOCATION),,--remove-env-vars GENERATOR_LOCATION)
 	@$(MAKE) --no-print-directory record-candidate PROJECT=$(PROJECT) REGION=$(REGION)
 	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
 	echo ">> candidate: https://candidate---documind-api-$$NUMBER.$(REGION).run.app (no traffic; remove with gcloud run services update-traffic documind-api --remove-tags candidate)"
@@ -1025,10 +1032,13 @@ tenant-backend: guard-project
 # whole corpus by default; GRAPH_ARGS="--source hr_policy_2026.md" builds one document's graph deterministically (16 September
 # 2026: reading order sorts the Acts before the handbook, so a limit never reached the handbook's entities once the corpus was in).
 # gate on the candidate, make promote. GRAPH_ARGS="--limit 200" is the bill; --ask "..." walks it for one question.
-# Needs: pip install --user google-genai==2.22.0 google-cloud-firestore==2.30.0 numpy
+# GRAPH_BACKEND=spanner writes it to Spanner Graph instead, with each name's embedding, and --ask then seeds by meaning.
+# Needs: pip install --user google-genai==2.22.0 google-cloud-firestore==2.30.0 google-cloud-spanner==3.60.0 numpy
 GRAPH_ARGS ?=
 graph: guard-project
-	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) PYTHONPATH=../.. $(PY) graph.py --project $(PROJECT) --tenant $(TENANT) $(GRAPH_ARGS)
+	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) PYTHONPATH=../.. \
+	  SPANNER_INSTANCE=$(SPANNER_INSTANCE) SPANNER_DATABASE=$(SPANNER_DATABASE) \
+	  $(PY) graph.py --project $(PROJECT) --tenant $(TENANT) --backend $(GRAPH_BACKEND) $(GRAPH_ARGS)
 
 # the versions view from the shell: every source's current version, generation, what the last reindex cost, the date
 # it declares, the corpus fingerprint - the rows GET /v1/sources serves and the UI's Documents page renders.

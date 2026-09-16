@@ -286,6 +286,7 @@ def version():
             "retrieval_mode": settings.retrieval_mode,
             "retrieval_backend": settings.retrieval_backend,   # vector | firestore | rag_engine | vertex_search: the DEFAULT; a tenant's pin and its data_region decide per request (the row's retrieval_backend is the effective one)
             "retrieval_graph": settings.retrieval_graph,   # 4.6's graph: off | on | auto (13 September 2026)
+            "graph_backend": settings.graph_backend,       # firestore | spanner (16 September 2026): spanner seeds the walk by meaning
             # 12 September 2026: the embedding the query vector comes from - the same pair the worker stamps on
             # every row - and whether the ledger's pre-filter is on. A reindex that "changed nothing" and a
             # retrieval that "got worse" both start here.

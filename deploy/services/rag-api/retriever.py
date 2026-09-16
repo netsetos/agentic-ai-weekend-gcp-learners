@@ -9,7 +9,7 @@ from google import genai
 from google.genai import types
 from google.cloud import firestore
 from config import settings
-from shared.documind_graph import FirestoreGraph, choose_mode   # 4.6's store, the lane's copy (13 September 2026)
+from shared.documind_graph import FirestoreGraph, SpannerGraph, choose_mode   # 4.6's stores, the lane's copies (13 and 16 September 2026)
 
 @lru_cache(maxsize=1)
 def _genai_client():
@@ -18,6 +18,25 @@ def _genai_client():
 @lru_cache(maxsize=1)
 def _index_endpoint():
     return aiplatform.MatchingEngineIndexEndpoint(settings.vector_index_endpoint)
+
+@lru_cache(maxsize=1)
+def _spanner_db():
+    """spanner.tf's database, when GRAPH_BACKEND=spanner (16 September 2026); imported here so a Firestore-graph revision
+    never loads the Spanner client."""
+    from google.cloud import spanner
+    return spanner.Client(project=settings.project_id).instance(settings.spanner_instance).database(settings.spanner_database)
+
+def _graph_store():
+    return SpannerGraph(_spanner_db()) if settings.graph_backend == "spanner" else FirestoreGraph(_fs())
+
+def embed_for_graph(q: str) -> list[float]:
+    """The question as the graph's vectors were made (SEMANTIC_SIMILARITY, the same model): graph.py embeds each
+    canonical node name this way, so the distance seed_by_vector ranks by compares like with like. One extra embedding
+    call per question, only on the Spanner graph and only when RETRIEVAL_GRAPH is not off."""
+    resp = _genai_client().models.embed_content(
+        model=settings.embed_model, contents=q,
+        config=types.EmbedContentConfig(task_type="SEMANTIC_SIMILARITY", output_dimensionality=768))
+    return resp.embeddings[0].values
 
 @lru_cache(maxsize=1)
 def _fs():
@@ -389,8 +408,13 @@ def graph_candidates(query: str, tenant_id: str, filters: dict | None = None) ->
     mode = settings.retrieval_graph
     if mode == "off":
         return []
-    g = FirestoreGraph(_fs())
-    seeds = g.seed(query, tenant_id)
+    g = _graph_store()
+    if settings.graph_backend == "spanner":
+        # By meaning (16 September 2026): the nearest node names to the question, none farther than the threshold.
+        # choose_mode still asks whether the question is relational, so `auto` stays dense for a plain lookup.
+        seeds = g.seed_by_vector(embed_for_graph(query), tenant_id, k=settings.graph_seed_k, max_distance=settings.graph_seed_distance)
+    else:
+        seeds = g.seed(query, tenant_id)
     if not seeds or (mode == "auto" and choose_mode(query, seeds) != "graph"):
         return []
     nodes = g.expand([s["node_id"] for s in seeds], tenant_id, hops=settings.graph_hops, cap=settings.graph_cap)

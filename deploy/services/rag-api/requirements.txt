@@ -24,3 +24,5 @@ opentelemetry-instrumentation-fastapi==0.65b0
 tenacity==9.1.4
 httpx==0.28.1
 tiktoken==0.14.0
+# 4.6 on the lane, Spanner Graph (16 September 2026): shared/documind_graph.SpannerGraph, GRAPH_BACKEND=spanner
+google-cloud-spanner==3.60.0

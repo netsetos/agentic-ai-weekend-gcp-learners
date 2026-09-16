@@ -123,6 +123,15 @@ fails when a deployment on `vector` answered from the Firestore rung. If the tie
 is not - a worker deployed before the index existed - `make backfill-vectors APPLY=1` streams every
 current row's stored embedding up, no model call.
 
+**Spanner is read now (16 September 2026).** `spanner.tf` carries 4.6's DDL at last - `GraphEdge` interleaved in
+its node `ON DELETE CASCADE`, `updated_at`, the edge label `RELATES_TO` the walk matches on - plus an `embedding`
+column the lesson does not have. `GRAPH_BACKEND=spanner` on the API (`make candidate GRAPH_BACKEND=spanner
+RETRIEVAL_GRAPH=auto`) walks `DocuMindGraph` with `shared/documind_graph.SpannerGraph`, and seeds it **by meaning**:
+the question's embedding against the node names' (`COSINE_DISTANCE`, exact; `GRAPH_SEED_K`, `GRAPH_SEED_DISTANCE`),
+so "who signs off on a big purchase?" reaches the CFO without the word CFO. `make graph GRAPH_BACKEND=spanner`
+builds it with each name's vector. The instance is provisioned Enterprise, 100 PU, hourly - the comment that called
+it a free trial is gone; 4.6's cell 5 shows the `--instance-type free-instance` route if a cohort wants ₹0.
+
 Since Modules 7 and 8 joined the lane (September 2026) `make up` also deploys the agent
 surfaces: `documind-mcp` (7.2, the lane's tools over MCP with the kit's identity rules),
 `documind-chat` (12.8, the four brains of 8.7 behind one `/v1/chat`) and `documind-agent`
