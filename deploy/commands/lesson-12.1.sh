@@ -56,21 +56,25 @@ gcloud services enable \
   clouddeploy.googleapis.com
 
 # ---- APPLY ----
-# Dry-run first
-terraform init -reconfigure -backend-config="bucket=documind-ai-YOUR-ID-tfstate"
-terraform plan -out=tfplan \
-  -var=project_id=documind-ai-YOUR-ID \
-  -var=billing_account_id=YOUR-BILLING-ID \
-  -var=github_repository_id=1358872052
+# Run from deploy/ (or deploy_module_rag), using the intended existing PROJECT/REGION.
+# First enable APIs above and initialize terraform/ with the original state bucket,
+# prefix and workspace. See INFRASTRUCTURE.md for new-project setup and recovery.
+# A new CI deployment also needs an explicit repository name, numeric ID and branch
+# via infrastructure.py prepare. Existing deployments preserve their current CI trust.
 
-# Apply when plan is green
-terraform apply tfplan
+# Read-only planning: reads linked billing, persists confirmed inputs, and refuses
+# deletion/replacement or a CI trust migration before selecting the saved plan.
+python commands/infrastructure.py plan \
+  --project="${PROJECT:?Set the intended project ID}" \
+  --region="${REGION:?Set the deployment region}"
 
-# Smoke tests
-gcloud iam service-accounts list --filter="email~documind-.*-sa"
-gcloud artifacts repositories describe documind --location=us-central1
-gcloud firestore databases list
-gsutil ls -b gs://documind-ai-YOUR-ID-uploads
-gcloud secrets list --filter=name~litellm
-gcloud billing budgets list --billing-account=YOUR-BILLING-ID
+# Only after reviewing the complete successful plan, run this separate command.
+python commands/infrastructure.py apply --project="$PROJECT" --region="$REGION"
+
+# Smoke tests (read-only)
+gcloud iam service-accounts list --project="$PROJECT" --filter="email~documind-.*-sa"
+gcloud artifacts repositories describe documind --project="$PROJECT" --location="$REGION"
+gcloud firestore databases list --project="$PROJECT"
+gcloud storage buckets describe "gs://$PROJECT-uploads"
+gcloud secrets list --project="$PROJECT" --filter=name~litellm
 

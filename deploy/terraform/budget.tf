@@ -1,6 +1,26 @@
+# The existing project data source reads its billing linkage through the Cloud
+# Billing API. Empty/omitted input therefore works for a normal rerun without a
+# shell-only export. An explicit account remains available for existing callers.
+locals {
+  budget_billing_account_id = upper(trimprefix(trimspace(
+    trimspace(var.billing_account_id) != "" ? var.billing_account_id :
+    coalesce(data.google_project.current.billing_account, " ")
+  ), "billingAccounts/"))
+}
+
 resource "google_billing_budget" "documind" {
-  billing_account = upper(trimprefix(trimspace(var.billing_account_id), "billingAccounts/"))
+  billing_account = local.budget_billing_account_id
   display_name    = "DocuMind monthly budget"
+
+  lifecycle {
+    precondition {
+      condition = (
+        can(regex("^[0-9A-Za-z]{6}-[0-9A-Za-z]{6}-[0-9A-Za-z]{6}$", local.budget_billing_account_id)) &&
+        local.budget_billing_account_id != "000000-000000-000000"
+      )
+      error_message = "No valid billing account was resolved. Link billing to project_id, enable cloudbilling.googleapis.com and allow the Terraform identity to read the project's billing information, or set billing_account_id explicitly to a real XXXXXX-XXXXXX-XXXXXX account ID."
+    }
+  }
 
   budget_filter {
     # The Budgets API names projects by NUMBER. The id form was accepted by the plan and
@@ -41,7 +61,7 @@ resource "google_billing_budget" "documind" {
       # the billing budget agent is a Google system account outside the organisation - which
       # is how the first live apply on an organisation project ended. The emails to billing
       # admins (disable_default_iam_recipients = false) need no grant and always go out.
-      pubsub_topic                     = var.budget_pubsub ? google_pubsub_topic.budget_alerts[0].id : null
+      pubsub_topic = var.budget_pubsub ? google_pubsub_topic.budget_alerts[0].id : null
     }
   }
   depends_on = [google_pubsub_topic_iam_member.budget_publisher]
@@ -63,18 +83,19 @@ resource "google_pubsub_topic_iam_member" "budget_publisher" {
 
 variable "billing_account_id" {
   type        = string
+  default     = ""
   nullable    = false
-  description = "The project's linked billing account ID, optionally prefixed with billingAccounts/."
+  description = "Optional budget billing account ID (billingAccounts/ prefix accepted). Empty discovers the account already linked to project_id; discovery does not change billing linkage. A nonempty value overrides discovery for the budget."
 
   validation {
-    condition = (
+    condition = trimspace(var.billing_account_id) == "" || (
       can(regex("^(billingAccounts/)?[0-9A-Za-z]{6}-[0-9A-Za-z]{6}-[0-9A-Za-z]{6}$", trimspace(var.billing_account_id))) &&
       upper(trimprefix(trimspace(var.billing_account_id), "billingAccounts/")) != "000000-000000-000000"
     )
-    error_message = "Set billing_account_id to the project's linked billing account ID (six alphanumeric characters per group: XXXXXX-XXXXXX-XXXXXX), optionally prefixed with billingAccounts/. Empty values and the 000000-000000-000000 placeholder are not allowed."
+    error_message = "Leave billing_account_id empty to discover the project's linked billing account, or supply a real XXXXXX-XXXXXX-XXXXXX ID, optionally prefixed with billingAccounts/. The 000000-000000-000000 placeholder is not allowed."
   }
 }
-variable "alert_channels"     {
+variable "alert_channels" {
   type    = list(string)
   default = []
 }

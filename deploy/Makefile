@@ -6,8 +6,9 @@
 #     make validate        run the Tier-A checks only
 #
 # Tier B (live, needs gcloud + terraform + a throwaway project — YOU run these on GCP):
-#     make plan  PROJECT=documind-ai-live-0910     terraform dry run (creates nothing)
-#     make up    PROJECT=...                        apply, build + deploy the services, seed the roster
+#     make plan  PROJECT=documind-ai-live-0910     prepare verified inputs and save a checked plan
+#     make up    PROJECT=...                        apply that reviewed plan, then build/deploy and seed
+#     Initialize the intended Terraform backend first; plan/up never reconfigure it.
 #     make tenant-policy TENANT= DATA_REGION=in|any   where a tenant's text may be held (13 September 2026): in = the kit's rows only; any = the managed stores too
 #     make tenant-backend TENANT= RETRIEVAL_BACKEND=  which store answers one tenant (vector | firestore | rag_engine | vertex_search | default); make up pins acme and zeta
 #     make media [MEDIA_ARGS=--video]              the corpus's figures (and the town hall video) under evals/corpus/
@@ -42,7 +43,8 @@ PY      ?= python
 # twenty-minute make trainset showed nothing until it exited (the Module 10 phase, 10 September).
 export PYTHONUNBUFFERED = 1
 TF_DIR   = terraform
-PLANFILE = tfplan.dryrun
+# Optional saved-plan path for up. Empty uses infrastructure.py's recorded plan.
+PLANFILE ?=
 
 # REGION is where the SERVICES run - Cloud Run, the VPC connector, Artifact Registry - and
 # the deploy scripts under commands/ build their image paths and connector paths from it.
@@ -92,10 +94,10 @@ TUNE_ADAPTER    ?= 4
 MODEL_BACKEND   ?= vertex
 SLM_STOCK       ?=
 ROUTER_ENFORCE  ?= 1
-# Module 12: the guard is a switch (12.6) and the pipeline's ref is a variable (12.7)
+# Module 12: the guard is a switch (12.6). CI trust is saved by infrastructure.py
+# from existing state, or explicitly configured for a new project; no branch default here.
 ARMOR           ?= off
 SEMANTIC_CACHE  ?= off
-DEPLOY_REF      ?= refs/heads/main
 # 12.5's ledger (11 September 2026): the API retrieves only chunks the ledger marks current - after the second
 # vector index is built and make backfill-current has run; RECONCILE_JOB=true schedules the nightly reconcile
 RETRIEVAL_CURRENT_ONLY ?= off
@@ -133,46 +135,40 @@ EMBEDDING_MODEL   ?= text-embedding-005
 EMBEDDING_VERSION ?= 1
 RECONCILE_IMAGE   ?= $(IMAGE_REPO)/ingest:$(GIT_SHA)
 
-# Three variables are declared with no default - project_id, billing_account_id and
-# github_repository_id - so terraform stops and PROMPTS for any one that is not passed.
-# That is what made `make plan` fail unattended. Every one of them is supplied below;
-# override any on the command line.
-#
-# github_repository_id arrived with 12.7 and deliberately has no default in variables.tf ("a
-# wrong id fails closed"). That is right for terraform and wrong for a dry run, which needs to
-# plan without a GitHub repo at all - so the placeholder lives HERE, where it is obviously a
-# placeholder, instead of in the variable where it would look like a real default.
-#   Real value: gh api repos/OWNER/REPO --jq .id   (netsetos/agentic-ai-weekend-gcp: 1358872052)
-# In the billing account's currency (an Indian account is INR): 5,000 a month is a rehearsal's
-# worth of Document AI and Gemini with room to spare. The lesson's own figure was 500 USD.
+# Billing and GitHub trust are project-specific inputs, never placeholders.
+# infrastructure.py prepare obtains the linked billing account and preserves the
+# existing state's CI identity. For a new project, configure its explicit GitHub
+# identity with the helper before make plan (see README.md). All direct Terraform
+# calls load this file LAST so shell defaults cannot replace these critical values.
+TF_PROJECT_VARS = $(abspath $(TF_DIR)/runbook-project.auto.tfvars.json)
+# In the billing account's currency (an Indian account is INR).
 BUDGET_AMOUNT      ?= 5000
 PAGERDUTY_KEY      ?= unset-in-dryrun
-BILLING_ACCOUNT_ID ?= 000000-000000-000000
-GITHUB_REPO_ID     ?= 000000000
-# The state bucket is the one resource that cannot be Terraformed (chicken and egg), so the
-# backend is configured at init time rather than hard-coded into backend.tf.
+# Explicit legacy import, teardown, and feature-job targets use this init recipe.
+# The safe plan/up path requires an initialized backend and never switches its bucket.
 TFSTATE_BUCKET     ?= documind-tfstate
 TFSTATE_PREFIX     ?= documind/$(PROJECT)
 
-TF_VARS = -var project_id=$(PROJECT) \
-          -var region=$(REGION) \
-          -var audit_lock=$(AUDIT_LOCK) \
-          -var gemini_quota_override=$(GEMINI_QUOTA_OVERRIDE) \
-          -var residency=$(RESIDENCY) \
-          -var budget_amount=$(BUDGET_AMOUNT) \
-          -var pagerduty_key=$(PAGERDUTY_KEY) \
-          -var billing_account_id=$(BILLING_ACCOUNT_ID) \
-          -var github_repository_id=$(GITHUB_REPO_ID) \
-          -var 'alert_emails=$(ALERT_EMAILS_JSON)' \
-          -var deploy_ref=$(DEPLOY_REF) \
-          -var reconcile_job=$(RECONCILE_JOB) \
-          -var batch_job=$(BATCH_JOB) \
-          -var managed_search=$(MANAGED_SEARCH) \
-          -var managed_mirror=$(MANAGED_MIRROR) \
-          -var reconcile_image=$(RECONCILE_IMAGE) \
-          -var retention_days=$(RETENTION_DAYS) \
-          -var embedding_model=$(EMBEDDING_MODEL) \
-          -var embedding_version=$(EMBEDDING_VERSION)
+TF_EXTRA_VARS = -var audit_lock=$(AUDIT_LOCK) \
+                -var gemini_quota_override=$(GEMINI_QUOTA_OVERRIDE) \
+                -var residency=$(RESIDENCY) \
+                -var budget_amount=$(BUDGET_AMOUNT) \
+                -var pagerduty_key=$(PAGERDUTY_KEY) \
+                -var 'alert_emails=$(ALERT_EMAILS_JSON)' \
+                -var reconcile_job=$(RECONCILE_JOB) \
+                -var batch_job=$(BATCH_JOB) \
+                -var managed_search=$(MANAGED_SEARCH) \
+                -var managed_mirror=$(MANAGED_MIRROR) \
+                -var reconcile_image=$(RECONCILE_IMAGE) \
+                -var retention_days=$(RETENTION_DAYS) \
+                -var embedding_model=$(EMBEDDING_MODEL) \
+                -var embedding_version=$(EMBEDDING_VERSION)
+TF_VARS = -var project_id=$(PROJECT) -var region=$(REGION) $(TF_EXTRA_VARS) \
+          -var-file="$(TF_PROJECT_VARS)"
+INFRA = $(PY) commands/infrastructure.py
+INFRA_FLAGS = --project "$(PROJECT)" --region "$(REGION)" --terraform-dir "$(TF_DIR)"
+INFRA_VARS = $(subst -var ,--var ,$(TF_EXTRA_VARS))
+INFRA_PLAN = $(if $(strip $(PLANFILE)),--plan "$(PLANFILE)",)
 TF_INIT = terraform init -input=false -reconfigure \
           -backend-config="bucket=$(TFSTATE_BUCKET)" \
           -backend-config="prefix=$(TFSTATE_PREFIX)"
@@ -233,12 +229,12 @@ preflight: guard-project
 apis: guard-project
 	@PROJECT=$(PROJECT) sh -c "$$(sed -n '/^# ---- ENABLE_APIS ----/,/^# ---- APPLY ----/p' commands/lesson-12.1.sh | grep -v '^# ----')"
 
-# terraform plan == the safe dry run: previews every resource, creates nothing.
-# -input=false makes a missing variable an ERROR instead of a prompt, which is what you want
-# in CI: a hang at 3am is worse than a failure at 3am.
-plan: guard-project extract
-	cd $(TF_DIR) && $(TF_INIT) && \
-	  terraform plan -input=false $(TF_VARS) -out=$(PLANFILE)
+# Use the committed deploy files as-is. Notebook extraction remains an explicit
+# authoring action (make extract / make check), never a deployment prerequisite.
+# The helper saves verified billing/CI inputs, rejects unexpected destruction,
+# and records a unique saved plan for review. Initialize the backend beforehand.
+plan: guard-project
+	$(INFRA) plan $(INFRA_FLAGS) $(INFRA_VARS)
 
 # A project that already has a Firestore database - Module 4's notebooks create `(default)`
 # and, in 4.2, the chunks vector index - makes the first apply a 409. Adopt what exists into
@@ -259,12 +255,12 @@ adopt-firestore: guard-project
 	  else echo ">> no $$coll vector index yet - terraform will create it"; fi; \
 	done
 
-# One command, in the order the pieces depend on each other: the infrastructure, a first
-# version of the one secret the UI mounts, the images, the services, the vector indexes
-# READY, the roster. Idempotent - re-run it and you are back in a few minutes.
-up: guard-project extract adopt-firestore
-	cd $(TF_DIR) && $(TF_INIT) && \
-	  terraform apply -input=false -auto-approve $(TF_VARS)
+# First run make plan and review its output. up applies only that checked saved
+# plan; it never creates a new plan, regenerates source, switches backends, or
+# silently imports existing resources. Run adopt-firestore explicitly if needed
+# BEFORE planning. Terraform rejects a saved plan if intervening work made it stale.
+up: guard-project
+	$(INFRA) apply $(INFRA_FLAGS) $(INFRA_PLAN)
 	$(MAKE) drift secrets build deploy-services wait-index roster managed-stores bq-views vector-status
 
 # After an apply, a plan should be EMPTY. A resource that is still "to be replaced" is one the

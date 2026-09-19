@@ -9,6 +9,19 @@ stack that Module 12 builds — so live-session day isn't a coin flip.
 > notebook heredoc and re-extract (`python tools/readopt.py <notebook> VAR <file>`
 > pushes a file edited on disk back into its heredoc). CI checks the two never drift.
 
+## Workstation infrastructure recovery and reruns
+
+Run the committed deployment files directly. See [INFRASTRUCTURE.md](INFRASTRUCTURE.md)
+for the Git-only update and checked `prepare → plan → check → apply` sequence.
+It includes native billing-account discovery, the Acme/Zeta digital-parser fix,
+persisted project inputs and preservation of existing GitHub CI trust. Public
+source downloads do not require switching CI trust to the learners repository.
+
+`make plan` prepares and checks a saved plan; `make up` now requires that selected,
+reviewed plan before it applies infrastructure and continues service setup. Live
+plan/up no longer regenerate deployment source. Maintainers still keep extracted
+source and its authoritative lesson copies in sync through the offline check.
+
 ---
 
 ## Two tiers
@@ -90,7 +103,7 @@ failing tool's own output folded under it - the raw job log of a public repo is 
 
 Until 15 September 2026 the kit had two profiles - `lean`, the Module 4 lane, and `full`, everything
 Module 12 teaches on top of it, count-gated in the same Terraform behind `local.full`. The course runs
-the full shape only now, so the switch is gone and `make up` stands up all of it: `documind-ingest`,
+the full shape only now, so the switch is gone and, after a reviewed `make plan`, `make up` stands up all of it: `documind-ingest`,
 `documind-api`, `documind-admin`, `documind-ui`, `documind-chat`, `documind-mcp` and `documind-agent` on
 Cloud Run; Firestore with its vector indexes and Vector Search with its endpoint (the ANN tier,
 `RETRIEVAL_BACKEND=vector` as the deployment's default, the Firestore rung beneath it); the Spanner
@@ -336,7 +349,7 @@ from outside the API; `make candidate RETRIEVAL_BACKEND=rag_engine` judges it. T
 Run on a **disposable** project so nothing real is touched. Teardown is not total: `make down` deletes the
 Cloud Run services, the candidate tag and the context caches (`make down-services`) and then runs
 `terraform destroy`, but it cannot remove Firestore (delete protection), a bucket that holds objects
-(`force_destroy = false`), a tuned endpoint (`make tune`) or the BigQuery views (`make bq-views`) - it names
+(`force_destroy = false`), protected managed search stores (`prevent_destroy = true`), a tuned endpoint (`make tune`) or the BigQuery views (`make bq-views`) - it names
 them and `gcloud projects delete` is what removes them. With `AUDIT_LOCK=true` the audit bucket's retention
 policy is LOCKED (`storage.tf`, `is_locked = var.audit_lock`), which blocks even the project's deletion for five
 years, by design; a lab keeps the five-year term without the lock, so its project can go.
@@ -347,13 +360,21 @@ gcloud projects create documind-ai-live-0901 --set-as-default
 gcloud billing projects link documind-ai-live-0901 --billing-account=XXXXXX-XXXXXX-XXXXXX
 gsutil mb -l asia-south1 -b on gs://documind-tfstate && gsutil versioning set on gs://documind-tfstate
 
-# 1. THE DRY RUN — previews every resource, creates nothing
-cd deploy && make plan PROJECT=documind-ai-live-0901 ADMIN_EMAILS=you@example.com
+# 1. Initialize the chosen state once, select the new CI identity, then plan.
+#    For existing resources use their original bucket, prefix and workspace.
+cd deploy
+terraform -chdir=terraform init -input=false \
+  -backend-config="bucket=documind-tfstate" \
+  -backend-config="prefix=documind/documind-ai-live-0901"
+python commands/infrastructure.py prepare --project documind-ai-live-0901 --region us-central1 \
+  --github-repository netsetos/agentic-ai-weekend-gcp \
+  --github-repository-id 1358872052 --deploy-ref refs/heads/main
+make plan PROJECT=documind-ai-live-0901 ADMIN_EMAILS=you@example.com
 
 # 2. bring it up: terraform apply, a first cookie-secret version, Cloud Build for every image
 #    make up deploys, the deploy scripts (IAP on the UI, one accessor per ADMIN_EMAILS),
 #    the vector indexes READY, ADMIN_EMAILS on TENANT's roster and the UI's service account
-#    on the three golden tenants'. Re-run it any time; it is idempotent.
+#    on the three golden tenants'. Review the selected plan first; create a new plan after a partial apply.
 make up PROJECT=documind-ai-live-0901 ADMIN_EMAILS=you@example.com
 
 # 2b. the corpus - thirteen real Acts as PDFs and the synthetic documents, one prefix per
@@ -376,8 +397,9 @@ make down PROJECT=documind-ai-live-0901
 gcloud projects delete documind-ai-live-0901
 ```
 
-`make up` is idempotent — if the live demo wedges mid-session, re-run it and
-you're back in ~5–8 min. The exact `gcloud run deploy` invocations (image, service
+`make up` applies the selected checked plan. After a partial apply or a state change,
+run `make plan`, review the new plan, then run `make up` again. Deployment time depends
+on live provisioning, image builds and service readiness. The exact `gcloud run deploy` invocations (image, service
 account, VPC connector, env vars) are in
 [`commands/lesson-12.2.sh`](commands/lesson-12.2.sh) · `12.3.sh` · `12.4.sh`,
 extracted verbatim from the notebooks.

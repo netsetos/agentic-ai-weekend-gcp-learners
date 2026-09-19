@@ -1,0 +1,12 @@
+# Workstation/project configuration and Terraform state never belong in Git.
+terraform/.terraform/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/*.tfplan
+terraform/*.tfplan.checked.json
+terraform/runbook-selected-plan.json
+terraform/tfplan*
+terraform/*.tfvars
+terraform/*.tfvars.json
+terraform/*.tfvars*.bak
+operator-evidence/

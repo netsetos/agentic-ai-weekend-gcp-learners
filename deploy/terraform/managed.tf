@@ -73,9 +73,10 @@ locals {
 
 # The data store: unstructured documents with metadata (CONTENT_REQUIRED, GENERIC, search). The worker imports
 # each version's text as one Document whose id is the doc_key, so a re-issue replaces and a retirement deletes.
-# No document_processing_config on purpose: the config is immutable, the default digital parsing serves text/plain,
-# and P9.5 reads extractive segments, which need no chunk mode. The schema is ours, not the default: the fields
-# the mirror writes, indexable so the API's doc_type / kind filters become filter expressions (P9.5).
+# Declare the API's default digital parser explicitly: refresh returns this immutable configuration even when
+# creation omitted it. Leaving it absent would plan replacement of populated stores on the next run.
+# P9.5 reads extractive segments, which need no chunk mode. The schema is ours, not the default: the fields the
+# mirror writes are indexable so the API's doc_type / kind filters become filter expressions (P9.5).
 resource "google_discovery_engine_data_store" "tenant" {
   for_each                     = local.managed_tenants
   location                     = "global"
@@ -86,6 +87,19 @@ resource "google_discovery_engine_data_store" "tenant" {
   solution_types               = ["SOLUTION_TYPE_SEARCH"]
   create_advanced_site_search  = false
   skip_default_schema_creation = true
+
+  document_processing_config {
+    default_parsing_config {
+      digital_parsing_config {}
+    }
+  }
+
+  # A parser/identity change or disabling managed_search must never silently
+  # delete the students' indexed documents. Review a migration or teardown
+  # explicitly before removing this guard; do not work around it with state rm.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "google_discovery_engine_schema" "tenant" {
