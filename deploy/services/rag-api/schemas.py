@@ -46,7 +46,7 @@ class RAGResponse(RAGAnswer):
     latency_ms: int
     # Where the time went (main.py stage()): retrieve_ms, rerank_ms, generate_ms and the pool the reranker saw.
     # The usage row carries the same four flat, for tenant_daily; here they ride together, for the caller.
-    stages: dict[str, int] = Field(default_factory=dict)
+    stages: dict[str, int | str] = Field(default_factory=dict)
     # 12.6's answer cache: "semantic" when this answer was served from it (backend=cache, cost 0), else "none".
     cache_hit: Literal["none", "semantic"] = "none"
 

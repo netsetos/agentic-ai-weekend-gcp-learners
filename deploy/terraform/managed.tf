@@ -24,6 +24,43 @@ variable "managed_mirror" {
   }
 }
 
+# RAG Engine's serverless corpus is backed by a Vector Search collection. The
+# RAG service agent (not the operator, ingest SA, or generic Vertex AI agent)
+# needs its Google-defined service-agent role before creating that collection.
+# Keep this IAM prerequisite in Terraform so fresh projects do not depend on
+# the timing of Google's automatic first-use IAM grants.
+# https://docs.cloud.google.com/iam/docs/roles-permissions/vectorsearch
+resource "google_project_service" "managed_rag" {
+  for_each = contains(["rag_engine", "both"], var.managed_mirror) ? toset([
+    "aiplatform.googleapis.com",
+    "vectorsearch.googleapis.com",
+  ]) : toset([])
+
+  project            = var.project_id
+  service            = each.value
+  disable_on_destroy = false
+}
+
+# Generate Google's service identities; do not create a user-managed account
+# with a similar name. The RAG identity uses the project NUMBER in its address.
+resource "google_project_service_identity" "managed_rag" {
+  count    = contains(["rag_engine", "both"], var.managed_mirror) ? 1 : 0
+  provider = google-beta
+  project  = var.project_id
+  service  = "aiplatform.googleapis.com"
+
+  depends_on = [google_project_service.managed_rag]
+}
+
+resource "google_project_iam_member" "managed_rag_service_agent" {
+  count   = contains(["rag_engine", "both"], var.managed_mirror) ? 1 : 0
+  project = var.project_id
+  role    = "roles/aiplatform.ragServiceAgent"
+  member  = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-vertex-rag.iam.gserviceaccount.com"
+
+  depends_on = [google_project_service_identity.managed_rag]
+}
+
 variable "tenants" {
   type        = list(string)
   default     = ["acme", "zeta"] # the tenants whose data_region is `any` (make roster): globex's text stays on the kit's rows

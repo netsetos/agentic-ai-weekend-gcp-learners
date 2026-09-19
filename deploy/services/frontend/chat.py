@@ -155,28 +155,43 @@ def chat_page(user):
 
     with st.chat_message("assistant"):
         sources, answer, done = [], "", {}
+        saw_done = False
         slot = st.empty()
-        for event, payload in stream_answer(prompt, tenant_id):
-            if event == "citation":
-                # Citations arrive BEFORE the first token - they come from
-                # retrieval, so the sources render while the answer is written.
-                # The five fields a citation always had, plus 9.6's four: a figure or a
-                # video segment arrives here with a locator, and citations.py renders it.
-                # Drop these keys and a figure comes back as plain text with no thumbnail,
-                # nothing raised, nothing logged - the silent projection 9.6 warned about.
-                sources.append({"text": payload.get("quote", ""),
-                                "source_uri": payload["source"],
-                                "page_start": payload.get("page"),
-                                "kind": payload.get("kind", "text"),
-                                "media_url": payload.get("media_url"),
-                                "start": payload.get("start"),
-                                "end": payload.get("end"),
-                                "effective_from": payload.get("effective_from")})
-            elif event == "token":
-                answer += payload["t"]
-                slot.markdown(answer)
-            elif event == "done":
-                done = payload
+        try:
+            for event, payload in stream_answer(prompt, tenant_id):
+                if event == "citation":
+                    # Citations arrive BEFORE the first token - they come from
+                    # retrieval, so the sources render while the answer is written.
+                    # The five fields a citation always had, plus 9.6's four: a figure or a
+                    # video segment arrives here with a locator, and citations.py renders it.
+                    # Drop these keys and a figure comes back as plain text with no thumbnail,
+                    # nothing raised, nothing logged - the silent projection 9.6 warned about.
+                    sources.append({"text": payload.get("quote", ""),
+                                    "source_uri": payload["source"],
+                                    "page_start": payload.get("page"),
+                                    "kind": payload.get("kind", "text"),
+                                    "media_url": payload.get("media_url"),
+                                    "start": payload.get("start"),
+                                    "end": payload.get("end"),
+                                    "effective_from": payload.get("effective_from")})
+                elif event == "token":
+                    answer += payload["t"]
+                    slot.markdown(answer)
+                elif event == "done":
+                    done = payload
+                    saw_done = True
+                elif event == "error":
+                    slot.empty()
+                    st.error("The answer stream failed. No completed answer was recorded.")
+                    return
+        except (requests.RequestException, ValueError, KeyError) as exc:
+            slot.empty()
+            st.error(f"The answer stream failed: {type(exc).__name__}. Retry after checking the API.")
+            return
+        if not saw_done or not answer.strip():
+            slot.empty()
+            st.error("The stream ended without a completed answer. Check the API and retry.")
+            return
         slot.empty()
         render_with_citations(answer, sources)
         if st.session_state.get("read_aloud") and answer:

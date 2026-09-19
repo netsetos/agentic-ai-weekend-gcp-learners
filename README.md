@@ -28,6 +28,8 @@ no second project to keep in step: the course's private repo holds this same tre
 
 ## Getting started
 
+Use the **`rag-production-hardening` branch** for the Module 4 runbook. This branch includes the current deployment fixes and its notebook clone commands select the same public branch.
+
 ### Colab (recommended)
 
 1. Open a lesson's `notebooks/` folder and click the **Open in Colab** badge at the top of the notebook.
@@ -39,7 +41,7 @@ no second project to keep in step: the course's private repo holds this same tre
 ### Local Jupyter
 
 ```bash
-git clone https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
+git clone --branch rag-production-hardening --single-branch https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
 cd agentic-ai-weekend-gcp-learners
 
 python -m venv .venv

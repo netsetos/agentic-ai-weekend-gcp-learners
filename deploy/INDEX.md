@@ -10,9 +10,9 @@ Lesson ids ending in `p` are practice labs.
 | A owned: extracted verbatim from a notebook heredoc | 91 | 0 |
 | B pasted: a block carried verbatim by notebooks | 2 | 0 |
 | C used: imported, read, run or excerpted by notebook code | 74 | 25 |
-| D prose: named in a notebook's text only | 0 | 0 |
+| D prose: named in a notebook's text only | 19 | 0 |
 | E unreferenced by any notebook | 0 | 42 |
-| total | 167 | 67 |
+| total | 186 | 67 |
 
 ## A. owned: extracted verbatim from a notebook heredoc (91)
 
@@ -167,7 +167,7 @@ Lesson ids ending in `p` are practice labs.
 | `services/chat/migrate.py` | code | - | 11.5,12.8,8.5 |
 | `services/chat/requirements-local.txt` | code | - | 12.7 |
 | `services/chat/requirements.txt` | code | - | 12.7 |
-| `services/chat/tools.py` | code | - | 10.1p,10.4,12.4,12.5,12.8,4.2,4.2p,4.3p,4.3,4.4p,4.4,4.5,4.5p,5.3,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.1,7.1p,7.2,7.2p,7.3,7.3p,8.1p,8.1,8.2,8.2p,8.3,8.3p,8.4,8.4p,8.5,8.6,8.7,9.6 |
+| `services/chat/tools.py` | code | - | 10.1p,10.4,12.4,12.8,4.2,4.2p,4.3p,4.3,4.4p,4.4,4.5,4.5p,5.3,6.1,6.1p,6.2,6.2p,6.3,6.3p,6.4,7.1,7.1p,7.2,7.2p,7.3,7.3p,8.1p,8.1,8.2,8.2p,8.3,8.3p,8.4,8.4p,8.5,8.6,8.7,9.6 |
 | `services/gemma-vllm/Dockerfile` | code | - | 11.2,12.7 |
 | `services/gemma-vllm/auth.py` | code | - | 11.2 |
 | `services/gemma-vllm/cloudbuild.yaml` | code | - | 11.1,11.1p,12.7 |
@@ -191,7 +191,7 @@ Lesson ids ending in `p` are practice labs.
 | `services/rag-api/cache_admin.py` | code | - | 10.2 |
 | `services/rag-api/cache_manager.py` | code | - | 10.1,10.2,10.3,10.4,10.5,10.6,12.2,12.5,12.6,4.5,4.5p |
 | `services/rag-api/context_budget.py` | code | - | 12.2,4.5 |
-| `services/rag-api/hybrid.py` | code | - | 10.4p,11.3p,12.2,4.5,4.5p,4.6,4.8,5.5 |
+| `services/rag-api/hybrid.py` | code | - | 10.4p,11.3p,12.2,12.5,4.5,4.5p,4.6,4.8,5.5 |
 | `services/rag-api/router.py` | code | - | 10.1,10.2,10.3,10.3p,10.4,10.5,10.6,11.1p,11.2p,11.3,11.3p,12.1,12.2,12.6,3.3,3.3p,5.5,6.4,8.2 |
 | `services/slm/Dockerfile` | code | - | 10.5,11.4 |
 | `services/slm/Modelfile` | code | - | 10.5,10.6,11.4,12.8 |
@@ -220,6 +220,30 @@ Lesson ids ending in `p` are practice labs.
 | `terraform/reconcile.tf` | code | - | 12.5 |
 | `terraform/spanner.tf` | code | - | 1.1p,1.1,12.1,12.2,12.5,4.6 |
 | `validate.py` | code | - | 10.1,11.2,12.7,3.2,3.3,4.2,4.2p,4.5,4.6,4.7 |
+
+## D. prose: named in a notebook's text only (19)
+
+| File | Kind | Owner | Shown by |
+|---|---|---|---|
+| `commands/check-firestore-fallback.py` | code | - | 12.8 |
+| `commands/check-hybrid-plumbing.sh` | code | - | 12.8 |
+| `commands/git-source.sh` | code | - | 12.8 |
+| `commands/session-restart.sh` | code | - | 12.8 |
+| `commands/tests/test_check_firestore_fallback.py` | code | - | 12.8 |
+| `commands/tests/test_document_embeddings.py` | code | - | 12.8 |
+| `commands/tests/test_git_source.py` | code | - | 12.8 |
+| `commands/tests/test_hybrid_plumbing.py` | code | - | 12.8 |
+| `commands/tests/test_session_restart.py` | code | - | 12.8 |
+| `commands/tests/test_smoke_agent_expectations.py` | code | - | 12.8 |
+| `commands/tests/test_smoke_mcp_setup.py` | code | - | 12.8 |
+| `commands/tests/test_spanner_graph.py` | code | - | 12.8 |
+| `commands/tests/test_verify_vector_index.py` | code | - | 12.8 |
+| `commands/verify-vector-index.py` | code | - | 12.8 |
+| `evals/demo_corpus_gate.py` | code | - | 12.8 |
+| `evals/tests/test_fetch_real.py` | code | - | 12.8 |
+| `operators/remirror_missing.py` | code | - | 12.8 |
+| `operators/tests/test_remirror_missing.py` | code | - | 12.8 |
+| `shared/sparse_encoder.py` | code | - | 12.8 |
 
 ## E. unreferenced by any notebook (42)
 

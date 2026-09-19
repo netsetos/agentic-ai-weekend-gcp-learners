@@ -1,5 +1,11 @@
-"""Embed, upsert to Vector Search, mirror into Firestore - and reuse what a re-issued document kept."""
+"""Embed, upsert to Vector Search, mirror into Firestore, and repair the vector tier.
+
+Dense and sparse representations are produced together. The sparse encoder is shared with
+rag-api/hybrid.py, so ingestion, undo/reupsert, backfill and query-time hybrid retrieval all use
+the same deterministic sparse space.
+"""
 import os
+import math
 
 from google.cloud import aiplatform
 from google.cloud import firestore
@@ -8,39 +14,33 @@ from google.cloud.firestore_v1.vector import Vector
 from google import genai
 
 from contracts import SCHEMA_VERSION
+from shared.sparse_encoder import SPARSE_ENCODER_VERSION, sparse_encode
 
-EMBED_BATCH = 250          # the regional API's per-request ceiling, in texts
-# ... and in tokens: text-embedding-005 takes at most 20,000 tokens per REQUEST, across all
-# the texts in it. Forty 500-token chunks is 20,000; every long Act failed on exactly this
-# the first time the corpus was loaded. Tokens are estimated at three characters each -
-# an overestimate for English, so a batch stops early rather than late.
+EMBED_BATCH = 250
 EMBED_TOKENS = 15_000
 CHARS_PER_TOKEN = 3
 DRY_RUN = os.environ.get("VECTOR_DRY_RUN") == "1"
-# ONE declared embedding, stamped on every row (12 September 2026): variables.tf's embedding_model and
-# embedding_version reach this worker and rag-api through the same two variables, so query and document vectors
-# come from one model by construction, and a model change is a planned migration (make reembed, deploy/INDEXING.md)
-# rather than a silent mismatch. The carry-over below reuses a vector only when its stamp is this one.
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-005")
 EMBEDDING_VERSION = os.environ.get("EMBEDDING_VERSION", "1")
+EMBEDDING_TASK_TYPE = "RETRIEVAL_DOCUMENT"
+EMBEDDING_DIMENSIONS = 768
 
-# Embeddings are REGIONAL. Generation is global-only; this client is neither
-# interchangeable with that one nor optional to get right.
-_embed = genai.Client(enterprise=True,
-                      project=os.environ["GOOGLE_CLOUD_PROJECT"],
-                      location="us-central1")
+_embed = genai.Client(
+    enterprise=True,
+    project=os.environ["GOOGLE_CLOUD_PROJECT"],
+    location="us-central1",
+)
 
 
 def batches(texts: list[str]) -> list[list[str]]:
-    """Batches of at most EMBED_BATCH texts and about EMBED_TOKENS tokens. Send 251 texts, or
-    20,001 tokens, and the request fails - not the last item, the whole call - so a
-    300-chunk document would index nothing at all."""
     out, cur, cur_tokens = [], [], 0
-    for t in texts:
-        tokens = max(1, len(t) // CHARS_PER_TOKEN)
+    for text in texts:
+        tokens = max(1, len(text) // CHARS_PER_TOKEN)
         if cur and (len(cur) >= EMBED_BATCH or cur_tokens + tokens > EMBED_TOKENS):
-            out.append(cur); cur, cur_tokens = [], 0
-        cur.append(t); cur_tokens += tokens
+            out.append(cur)
+            cur, cur_tokens = [], 0
+        cur.append(text)
+        cur_tokens += tokens
     if cur:
         out.append(cur)
     return out
@@ -49,102 +49,120 @@ def batches(texts: list[str]) -> list[list[str]]:
 def embed_all(texts: list[str]) -> list[list[float]]:
     out: list[list[float]] = []
     for batch in batches(texts):
-        r = _embed.models.embed_content(
-            model=EMBEDDING_MODEL, contents=batch,
-            config={"output_dimensionality": 768})
-        out.extend([e.values for e in r.embeddings])
+        response = _embed.models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=batch,
+            config={"output_dimensionality": EMBEDDING_DIMENSIONS, "task_type": EMBEDDING_TASK_TYPE},
+        )
+        vectors = [list(embedding.values) for embedding in (response.embeddings or [])]
+        if len(vectors) != len(batch) or any(not valid_vector(v) for v in vectors):
+            raise ValueError("Embedding response must contain one finite 768-dimensional vector per text")
+        out.extend(vectors)
     return out
 
 
-# ------------------------------------------------------------------------- the carry-over (12 September 2026)
+def valid_vector(vector) -> bool:
+    return (vector is not None and len(list(vector)) == EMBEDDING_DIMENSIONS
+            and all(math.isfinite(v) for v in vector))
+
+
+def document_embedding_matches(row: dict) -> bool:
+    """Unstamped legacy vectors used the API default (RETRIEVAL_QUERY), not document encoding."""
+    return (row.get("embedding_model") == EMBEDDING_MODEL
+            and str(row.get("embedding_version")) == str(EMBEDDING_VERSION)
+            and row.get("embedding_task_type") == EMBEDDING_TASK_TYPE
+            and valid_vector(row.get("embedding")))
+
+
 def held_vectors(db: firestore.Client, doc, chunks_collection: str = "chunks") -> dict[str, list[float]]:
-    """The previous version's CURRENT rows of this source, keyed by chunk_hash - only those made with the embedding
-    this worker is configured for. Rows older than schema 2 carry no hash and contribute nothing, which is the
-    honest outcome: a vector nobody can prove is the same text is embedded again."""
+    """Reuse a prior CURRENT dense vector only when the chunk hash and embedding stamp match."""
     out: dict[str, list[float]] = {}
-    query = (db.collection(chunks_collection).where("tenant_id", "==", doc.tenant_id)
-             .where("source_uri", "==", doc.gcs_uri).where("current", "==", True))
+    query = (
+        db.collection(chunks_collection)
+        .where("tenant_id", "==", doc.tenant_id)
+        .where("source_uri", "==", doc.gcs_uri)
+        .where("current", "==", True)
+    )
     for snap in query.stream():
-        d = snap.to_dict() or {}
-        h, vec = d.get("chunk_hash"), d.get("embedding")
-        if (h and vec is not None and d.get("embedding_model") == EMBEDDING_MODEL
-                and str(d.get("embedding_version")) == str(EMBEDDING_VERSION)):
-            out[h] = list(vec)
+        row = snap.to_dict() or {}
+        chunk_hash, vector = row.get("chunk_hash"), row.get("embedding")
+        if chunk_hash and document_embedding_matches(row):
+            out[chunk_hash] = list(vector)
     return out
 
 
 def plan_carry_over(chunks: list[dict], held: dict[str, list[float]]) -> tuple[list, list[int]]:
-    """Pure: for each chunk, the held vector (by chunk_hash) or None; and the positions that need embedding.
-    A one-clause edit of a 283-section handbook comes back as 281 hits and two misses - the clause and the
-    preamble that now carries the effective date. tools/check_auth_wiring.py runs this offline."""
     vectors, misses = [], []
-    for i, c in enumerate(chunks):
-        v = held.get(c.get("chunk_hash") or "")
-        vectors.append(v)
-        if v is None:
-            misses.append(i)
+    for index, chunk in enumerate(chunks):
+        vector = held.get(chunk.get("chunk_hash") or "")
+        vectors.append(vector)
+        if vector is None:
+            misses.append(index)
     return vectors, misses
 
 
 def embed_with_carry_over(db: firestore.Client, doc, chunks: list[dict]) -> tuple[list[list[float]], dict]:
-    """Pay for what changed. Returns every chunk's vector, and {reused, embedded}: the counts ingest_ok logs, the
-    claim records and the ledger row keeps, so a reindex's cost is a number an operator reads, not a bill they
-    discover."""
     held = held_vectors(db, doc)
     vectors, misses = plan_carry_over(chunks, held)
-    fresh = embed_all([chunks[i]["text"] for i in misses]) if misses else []
-    for i, v in zip(misses, fresh):
-        vectors[i] = v
+    fresh = embed_all([chunks[index]["text"] for index in misses]) if misses else []
+    for index, vector in zip(misses, fresh):
+        vectors[index] = vector
     return vectors, {"reused": len(chunks) - len(misses), "embedded": len(misses)}
 
 
 def _restricts(tenant_id: str, kind: str, doc_type: str) -> list:
-    """The four restrict namespaces every datapoint carries, set HERE, at write time - a filter applied only at
-    query time is one forgotten WHERE clause away from a leak. rag-api/retriever.py turns each key of a request's
-    `filters` into a Namespace of the same name, so a namespace missing here is a filter that matches nothing.
-
-    tenant_id  what makes one index safe for many customers.
-    kind       so a caller can ask for figures only (filters={"kind": "figure"} in rag-api's QueryRequest).
-    doc_type   the row's doc_type (12 September 2026): filters={"doc_type": "policy"} used to return an empty
-               pool, because the namespace was never written. The value is whatever the row carries - `unknown`
-               for a text upload the worker did not classify - the same field the Firestore fallback filters on.
-    current    the ledger's (12.5): a new version is current; the worker upserts AFTER the swap and removes the
-               retired ids, and the query-time restrict is what a reader asks for."""
-    return [IndexDatapoint.Restriction(namespace="tenant_id", allow_list=[tenant_id]),
-            IndexDatapoint.Restriction(namespace="kind", allow_list=[kind]),
-            IndexDatapoint.Restriction(namespace="doc_type", allow_list=[doc_type]),
-            IndexDatapoint.Restriction(namespace="current", allow_list=["true"])]
-
-
-def to_datapoints(doc, chunks: list[dict],
-                  vectors: list[list[float]]) -> list[IndexDatapoint]:
-    """chunks are dicts - {text, kind, media_url?, page_start?, start?, end?} - since the
-    corpus grew figures and video segments (9.6). Only the text is embedded."""
     return [
-        IndexDatapoint(
-            datapoint_id=doc.chunk_id(i),
-            feature_vector=v,
-            restricts=_restricts(doc.tenant_id, c.get("kind", "text"), doc.doc_type),
+        IndexDatapoint.Restriction(namespace="tenant_id", allow_list=[tenant_id]),
+        IndexDatapoint.Restriction(namespace="kind", allow_list=[kind]),
+        IndexDatapoint.Restriction(namespace="doc_type", allow_list=[doc_type]),
+        IndexDatapoint.Restriction(namespace="current", allow_list=["true"]),
+    ]
+
+
+def _sparse(text: str) -> IndexDatapoint.SparseEmbedding:
+    values, dimensions = sparse_encode(text)
+    return IndexDatapoint.SparseEmbedding(values=values, dimensions=dimensions)
+
+
+def _datapoint(datapoint_id: str, dense_vector: list[float], text: str,
+               tenant_id: str, kind: str, doc_type: str) -> IndexDatapoint:
+    """The one production datapoint shape used by ingest, undo and repair."""
+    return IndexDatapoint(
+        datapoint_id=datapoint_id,
+        feature_vector=list(dense_vector),
+        sparse_embedding=_sparse(text),
+        restricts=_restricts(tenant_id, kind, doc_type),
+    )
+
+
+def to_datapoints(doc, chunks: list[dict], vectors: list[list[float]]) -> list[IndexDatapoint]:
+    """Build dense+sparse Vector Search datapoints from canonical chunk text."""
+    return [
+        _datapoint(
+            doc.chunk_id(index),
+            vector,
+            chunk["text"],
+            doc.tenant_id,
+            chunk.get("kind", "text"),
+            doc.doc_type,
         )
-        for i, (c, v) in enumerate(zip(chunks, vectors))
+        for index, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
 
 
 def upsert(index_name: str, datapoints: list[IndexDatapoint]) -> None:
-    if DRY_RUN:
-        print(f"  [dry-run] would upsert {len(datapoints)} datapoints, "
-              f"ids {datapoints[0].datapoint_id} .. {datapoints[-1].datapoint_id}")
+    if not datapoints:
         return
-    # Streaming upserts need an index created with STREAM_UPDATE. A BATCH_UPDATE
-    # index accepts the call and applies nothing until the next batch job, which
-    # looks exactly like a slow index.
-    aiplatform.MatchingEngineIndex(index_name).upsert_datapoints(
-        datapoints=datapoints)
+    if DRY_RUN:
+        print(
+            f"  [dry-run] would upsert {len(datapoints)} datapoints, "
+            f"ids {datapoints[0].datapoint_id} .. {datapoints[-1].datapoint_id}"
+        )
+        return
+    aiplatform.MatchingEngineIndex(index_name).upsert_datapoints(datapoints=datapoints)
 
 
 def remove_datapoints(index_name: str, ids: list[str]) -> None:
-    """The ANN tier's half of retiring a version: the old ids leave it (permanent there - the
-    Firestore rows keep the flag and the history, and reupsert() below is how the undo puts them back)."""
     if not ids:
         return
     if DRY_RUN:
@@ -155,109 +173,119 @@ def remove_datapoints(index_name: str, ids: list[str]) -> None:
 
 def reupsert(index_name: str, db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: str,
              chunks_collection: str = "chunks") -> int:
-    """The undo's half in the ANN tier (12 September 2026). remove_datapoints() took the retired ids out of the
-    ANN tier for good, so an undo that only flipped its Firestore rows left the version current in Firestore and
-    absent from Vector Search - retrievable through the Firestore rung, invisible through the endpoint. The rows kept their
-    vectors (the `embedding` field is the chaos fallback's), so the current rows of the reactivated version go back
-    up from there, with the same four restricts to_datapoints() writes, and nothing is embedded. Returns the
-    datapoints upserted; the worker calls it BEFORE it retires the newer version, so the tier never holds none."""
-    query = (db.collection(chunks_collection).where("tenant_id", "==", tenant_id)
-             .where("source_uri", "==", gcs_uri).where("current", "==", True))
-    points = []
-    for snap in query.stream():
-        d = snap.to_dict() or {}
-        key = d.get("doc_key") or snap.id.split("#")[0].replace(":", "_", 1)     # idempotency._doc_key_of's rule
-        if key != doc_key or d.get("embedding") is None:
-            continue
-        points.append(IndexDatapoint(datapoint_id=snap.id, feature_vector=list(d["embedding"]),
-                                     restricts=_restricts(d.get("tenant_id") or tenant_id, d.get("kind") or "text",
-                                                          d.get("doc_type") or "unknown")))
-    if points:
+    """Restore one reactivated document to Vector Search without changing its ids."""
+    query = (
+        db.collection(chunks_collection)
+        .where("tenant_id", "==", tenant_id)
+        .where("source_uri", "==", gcs_uri)
+        .where("current", "==", True)
+    )
+    snapshots = [snap for snap in query.stream()
+                 if ((snap.to_dict() or {}).get("doc_key")
+                     or snap.id.split("#")[0].replace(":", "_", 1)) == doc_key]
+    return _repair_snapshots(index_name, db, snapshots)
+
+
+def _repair_snapshots(index_name: str, db: firestore.Client, snapshots, batch_size: int = 100) -> int:
+    """Upsert first, then checkpoint repaired Firestore vectors with optimistic concurrency.
+
+    Run during an ingestion maintenance window: Vector Search and Firestore do not share a
+    transaction. A failed ANN write never marks a row migrated. A failed Firestore commit leaves
+    the whole batch retryable. Existing ids, text, current flags and source generations are retained.
+    """
+    if DRY_RUN:
+        raise ValueError("VECTOR_DRY_RUN must be unset for vector repair; use the CLI without --apply to plan")
+    if not 1 <= batch_size <= 100:
+        raise ValueError("batch_size must be between 1 and 100")
+    total, pending = 0, []
+
+    def repair(group):
+        rows = [snap.to_dict() or {} for snap in group]
+        for snap, row in zip(group, rows):
+            if not row.get("current") or row.get("staged") or not row.get("tenant_id") or not row.get("text"):
+                raise ValueError(f"Refusing invalid current chunk: {snap.id}")
+        misses = [i for i, row in enumerate(rows) if not document_embedding_matches(row)]
+        fresh = embed_all([rows[i]["text"] for i in misses]) if misses else []
+        replacement = dict(zip(misses, fresh))
+        points = [_datapoint(snap.id, replacement[i] if i in replacement else list(row["embedding"]),
+                             row["text"], row["tenant_id"], row.get("kind") or "text",
+                             row.get("doc_type") or "unknown")
+                  for i, (snap, row) in enumerate(zip(group, rows))]
         upsert(index_name, points)
-    return len(points)
+        if replacement:
+            batch = db.batch()
+            for i, vector in replacement.items():
+                snap = group[i]
+                batch.update(snap.reference, {
+                    "embedding": Vector(vector), "embedding_model": EMBEDDING_MODEL,
+                    "embedding_version": EMBEDDING_VERSION, "embedding_task_type": EMBEDDING_TASK_TYPE,
+                    "embedding_updated_at": firestore.SERVER_TIMESTAMP,
+                }, option=db.write_option(last_update_time=snap.update_time))
+            batch.commit()
+        return len(group)
+
+    for snap in snapshots:
+        pending.append(snap)
+        if len(pending) == batch_size:
+            total += repair(pending)
+            pending = []
+    if pending:
+        total += repair(pending)
+    return total
 
 
 def backfill(index_name: str, db: firestore.Client, tenant_id: str | None = None,
              chunks_collection: str = "chunks", batch_size: int = 100) -> int:
-    """Every CURRENT chunk's stored embedding into the ANN tier (16 September 2026).
+    """Rebuild CURRENT datapoints and persist missing/legacy document embeddings.
 
-    reupsert() is the undo's half: one document, by doc_key. This is the tier's half of a repair -
-    the state where Firestore holds the corpus and the index holds nothing, which is what a worker
-    deployed without VECTOR_INDEX_NAME leaves behind, and what a first apply that lost its index
-    leaves behind after the second one succeeds (make backfill-vectors).
-
-    Nothing is embedded: the rows carry their vectors already (mirror_to_firestore stores them for
-    the chaos rung). The restricts are to_datapoints()'s, so a backfilled datapoint is indistinguishable
-    from one the worker wrote. Streamed in batches - upsert_datapoints takes a bounded list.
-    Returns the datapoints upserted."""
+    Already stamped model/version/task/dimension matches reuse their vectors on a retry.
+    Re-uploading unchanged source bytes is deliberately not required.
+    """
     query = db.collection(chunks_collection).where("current", "==", True)
     if tenant_id:
         query = query.where("tenant_id", "==", tenant_id)
-    points, total = [], 0
-    for snap in query.stream():
-        d = snap.to_dict() or {}
-        if d.get("embedding") is None:
-            continue
-        points.append(IndexDatapoint(
-            datapoint_id=snap.id, feature_vector=list(d["embedding"]),
-            restricts=_restricts(d.get("tenant_id") or (tenant_id or ""), d.get("kind") or "text",
-                                 d.get("doc_type") or "unknown")))
-        if len(points) >= batch_size:
-            upsert(index_name, points); total += len(points); points = []
-    if points:
-        upsert(index_name, points); total += len(points)
-    return total
+    return _repair_snapshots(index_name, db, list(query.stream()), batch_size)
 
 
 def mirror_to_firestore(db: firestore.Client, doc, chunks: list[dict],
                         vectors: list[list[float]], staged: bool = False, stage_expire_at=None) -> None:
-    """The payload store, and the chaos fallback.
-
-    Vector Search holds the vectors; Firestore holds the text the model quotes.
-    Storing the embedding here TOO, as a Vector field, means find_nearest() can
-    answer while Vector Search is unavailable - slower and good enough, instead
-    of an outage.
-
-    The document is THE canonical shape (2.3, 4.2, 4.5, rag-api): tenant_id, text,
-    source_uri, page_start, doc_type, embedding - plus, for a figure or a video
-    segment, kind / media_url / start / end. resolve() in shared/documind_schemas.py
-    reads exactly these names into a Citation, so what is written here is what the
-    frontend renders as a thumbnail or a timestamp (gap G7). A text chunk carries
-    kind="text" and nothing else new, so nothing written before Module 9 changes.
-
-    Schema 2 (12 September 2026) adds chunk_hash and locator (the chunk's identity across versions),
-    the embedding stamp, schema_version - and, with staged=True, a row that is NOT current yet:
-    current=false, staged=true, expire_at a day out. idempotency.swap_versions makes it current in one
-    pass and clears the stage marks; a stage nothing ever swaps expires by policy, like a retired row.
-    """
+    """Write the canonical payload row and dense fallback vector to Firestore."""
     batch, pending = db.batch(), 0
-    for i, (c, vec) in enumerate(zip(chunks, vectors)):
-        ref = db.collection("chunks").document(doc.chunk_id(i))
-        row = {"tenant_id": doc.tenant_id, "text": c["text"],
-               "source_uri": doc.gcs_uri, "page_start": c.get("page_start"),
-               "doc_type": doc.doc_type, "kind": c.get("kind", "text"),
-               # The ledger (11 September 2026): which version this chunk belongs to, that it is the
-               # current one, and when it landed. The swap flips `current` on the predecessor.
-               "doc_key": doc.doc_key, "current": not staged,
-               "indexed_at": firestore.SERVER_TIMESTAMP,
-               "chunk_hash": c.get("chunk_hash"), "locator": c.get("locator"),
-               "embedding_model": EMBEDDING_MODEL, "embedding_version": EMBEDDING_VERSION,
-               "schema_version": SCHEMA_VERSION,
-               "embedding": Vector(vec)}
-        if c.get("section"):
-            row["section"] = c["section"]
+    for index, (chunk, vector) in enumerate(zip(chunks, vectors)):
+        ref = db.collection("chunks").document(doc.chunk_id(index))
+        row = {
+            "tenant_id": doc.tenant_id,
+            "text": chunk["text"],
+            "source_uri": doc.gcs_uri,
+            "page_start": chunk.get("page_start"),
+            "doc_type": doc.doc_type,
+            "kind": chunk.get("kind", "text"),
+            "doc_key": doc.doc_key,
+            "current": not staged,
+            "indexed_at": firestore.SERVER_TIMESTAMP,
+            "chunk_hash": chunk.get("chunk_hash"),
+            "locator": chunk.get("locator"),
+            "embedding_model": EMBEDDING_MODEL,
+            "embedding_version": EMBEDDING_VERSION,
+            "embedding_task_type": EMBEDDING_TASK_TYPE,
+            "sparse_encoder_version": SPARSE_ENCODER_VERSION,
+            "schema_version": SCHEMA_VERSION,
+            "embedding": Vector(vector),
+        }
+        if chunk.get("section"):
+            row["section"] = chunk["section"]
         if staged:
             row["staged"] = True
             if stage_expire_at is not None:
                 row["expire_at"] = stage_expire_at
         if getattr(doc, "effective_from", None):
             row["effective_from"] = doc.effective_from
-        for k in ("media_url", "start", "end"):
-            if c.get(k) is not None:
-                row[k] = c[k]
+        for key in ("media_url", "start", "end"):
+            if chunk.get(key) is not None:
+                row[key] = chunk[key]
         batch.set(ref, row)
         pending += 1
-        if pending == 400:                     # a Firestore batch holds 500 writes; a long Act is more
+        if pending == 400:
             batch.commit()
             batch, pending = db.batch(), 0
     if pending:
@@ -265,25 +293,29 @@ def mirror_to_firestore(db: firestore.Client, doc, chunks: list[dict],
 
 
 def mirror_to_bigquery(bq, table: str, doc, chunks: list[dict], pii_chunk_ids: set) -> int:
-    """The SQL lane's copy of the REAL chunks (lesson 5.5, gap G9).
-
-    One row per chunk into rag_data.chunk_source - the same canonical names, plus the DLP
-    verdict this worker already computed, so 5.5's feature job needs no second scan and no
-    BigQuery model to know pii_flag. insertId = chunk id: a retried message re-inserts the
-    same rows and BigQuery de-duplicates them. `table` is BQ_CHUNK_TABLE
-    (PROJECT.rag_data.chunk_source); unset means the lane is off and nothing is written.
-    """
     if not table:
         return 0
     from datetime import datetime, timezone
 
     now = datetime.now(timezone.utc).isoformat()
-    rows = [{"chunk_id": doc.chunk_id(i), "tenant_id": doc.tenant_id, "text": c["text"],
-             "source_uri": doc.gcs_uri, "page_start": c.get("page_start"), "page_end": None,
-             "doc_type": doc.doc_type, "kind": c.get("kind", "text"), "heading_path": c.get("section"),
-             "last_revised_at": None, "pii_flag": doc.chunk_id(i) in pii_chunk_ids,
-             "ingested_at": now} for i, c in enumerate(chunks)]
-    errors = bq.insert_rows_json(table, rows, row_ids=[r["chunk_id"] for r in rows])
+    rows = [
+        {
+            "chunk_id": doc.chunk_id(index),
+            "tenant_id": doc.tenant_id,
+            "text": chunk["text"],
+            "source_uri": doc.gcs_uri,
+            "page_start": chunk.get("page_start"),
+            "page_end": None,
+            "doc_type": doc.doc_type,
+            "kind": chunk.get("kind", "text"),
+            "heading_path": chunk.get("section"),
+            "last_revised_at": None,
+            "pii_flag": doc.chunk_id(index) in pii_chunk_ids,
+            "ingested_at": now,
+        }
+        for index, chunk in enumerate(chunks)
+    ]
+    errors = bq.insert_rows_json(table, rows, row_ids=[row["chunk_id"] for row in rows])
     if errors:
         raise RuntimeError(f"BigQuery rejected {len(errors)} chunk_source row(s): {errors[0]}")
     return len(rows)

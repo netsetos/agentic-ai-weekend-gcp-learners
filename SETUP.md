@@ -18,9 +18,8 @@ gcloud billing projects link documind-ai-YOUR-ID \
 ```
 
 ```bash
-# Enable the 32 APIs the DocuMind kit needs - in TWO calls. Service Usage takes at most
-# twenty services per call (SU_MAX_BATCH_SIZE_EXCEEDED); the first live run learnt it (4.8, F1).
-# The same list, in the same two calls, is what lesson 12.1's kit runs (deploy/commands/lesson-12.1.sh).
+# Enable the same 40 APIs as deploy/commands/lesson-12.1.sh.
+# Service Usage accepts at most twenty services per call.
 gcloud services enable \
   run.googleapis.com \
   compute.googleapis.com \
@@ -32,12 +31,16 @@ gcloud services enable \
   storage.googleapis.com \
   aiplatform.googleapis.com \
   documentai.googleapis.com \
+  vision.googleapis.com \
+  language.googleapis.com \
+  translate.googleapis.com \
   speech.googleapis.com \
   texttospeech.googleapis.com \
   dlp.googleapis.com \
   iap.googleapis.com \
   iamcredentials.googleapis.com \
-  cloudbuild.googleapis.com
+  cloudbuild.googleapis.com \
+  orgpolicy.googleapis.com
 
 gcloud services enable \
   cloudtrace.googleapis.com \
@@ -55,7 +58,11 @@ gcloud services enable \
   modelarmor.googleapis.com \
   cloudbilling.googleapis.com \
   cloudresourcemanager.googleapis.com \
-  serviceusage.googleapis.com
+  serviceusage.googleapis.com \
+  vectorsearch.googleapis.com \
+  spanner.googleapis.com \
+  container.googleapis.com \
+  clouddeploy.googleapis.com
 
 # Wait for propagation (IAM can take up to 60s)
 echo "Waiting 60s for API propagation..."
@@ -89,7 +96,7 @@ repo (`/content/agentic-ai-weekend-gcp-learners`) the first time they need the k
 ## Local Jupyter
 
 ```bash
-git clone https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
+git clone --branch rag-production-hardening --single-branch https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
 cd agentic-ai-weekend-gcp-learners
 python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt

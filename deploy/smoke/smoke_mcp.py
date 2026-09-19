@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Live smoke test for the MCP server (lesson 7.2) - the lane's agent surface, four checks.
 
-    make smoke-mcp PROJECT=...                       # from deploy/, after the mcp service is deployed
-    DOCUMIND_MCP_URL=https://documind-mcp-NUMBER.us-central1.run.app \\
+    make smoke-mcp PROJECT=... REGION=...            # from deploy/, after the mcp service is deployed
+    DOCUMIND_MCP_URL=https://documind-mcp-NUMBER.REGION.run.app \\
       DOCUMIND_IMPERSONATE_SA=documind-ui-sa@PROJECT.iam.gserviceaccount.com python smoke/smoke_mcp.py
 
     1. GET /health                       -> 200, the platform's view
@@ -13,8 +13,10 @@
 
 Like smoke/smoke.py it mints the caller's identity with gcloud: --impersonate-service-account,
 --audiences=THIS service's URL (Cloud Run checks the token was minted for it; the server checks
-it again with SELF_URL), --include-email (the roster looks the caller up by email). Needs
-`pip install --user fastmcp==3.4.7` in the shell that runs it.
+it again with SELF_URL), --include-email (the roster looks the caller up by email).
+Activate the runbook virtual environment, then install the client in that environment:
+
+    python -m pip install 'fastmcp==3.4.7'
 """
 from __future__ import annotations
 
@@ -75,7 +77,8 @@ def main() -> int:
     print(f"\n  DocuMind MCP - live smoke test\n  target: {MCP_URL}\n  " + "-" * 56)
     member = token_as(IMPERSONATE)
     if IMPERSONATE and not member:
-        print("  (proceeding unauthenticated - expect refusals on a private service)")
+        bad("member identity token", "could not mint the requested identity; no MCP requests were made")
+        return 1
 
     # 1. health, through the platform's IAM ingress
     req = urllib.request.Request(f"{MCP_URL}/health")
@@ -111,12 +114,18 @@ def main() -> int:
     # 4. the outsider: invited by IAM, refused by the roster
     if OUTSIDER:
         outsider = token_as(OUTSIDER)
-        try:
-            out = asyncio.run(call(outsider, "retrieve", {"query": QUESTION, "tenant": TENANT}))
-            bad("outsider refused", f"answered: {str(out)[:120]}")
-        except Exception as e:  # noqa: BLE001
-            msg = str(e)
-            (ok if "roster" in msg or "not authenticated" in msg else bad)("outsider refused", msg[:160])
+        if not outsider:
+            bad("outsider refused", "could not mint the outsider identity; tenant-roster refusal was not tested")
+        else:
+            try:
+                out = asyncio.run(call(outsider, "retrieve", {"query": QUESTION, "tenant": TENANT}))
+                bad("outsider refused", f"answered: {str(out)[:120]}")
+            except Exception as e:  # noqa: BLE001
+                msg = str(e)
+                roster_denied = (("is not on tenant " in msg and "'s roster" in msg)
+                                 or "is on no tenant's roster" in msg)
+                (ok if roster_denied and "not authenticated" not in msg.lower() else bad)(
+                    "outsider refused", msg[:160])
 
     print("  " + "-" * 56 + f"\n  {len(passed)} passed, {len(failed)} failed\n")
     return 1 if failed else 0

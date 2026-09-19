@@ -15,18 +15,26 @@ name: DocuMind dry run (Tier A)
 # read Modules 4 to 8 too (the lane rules, the pasted blocks, the corpus), so a
 # PR that touches a Module 4 notebook used to reach main unchecked. None of them
 # needs a project, gcloud or a .env.
+#
+# The public learner layout ships deploy/ without private authoring tools or
+# Module */ source paths. It runs the same kit tests, evaluator, Terraform and
+# image checks. Only curriculum-source gates require the authoring layout.
 
 on:
   push:
     paths:
       - "deploy/**"
       - "Module */**/*.ipynb"
+      - "module-*/**/*.ipynb"
+      - "course-manifest.json"
       - "tools/**"
       - ".github/workflows/documind-dryrun.yml"
   pull_request:
     paths:
       - "deploy/**"
       - "Module */**/*.ipynb"
+      - "module-*/**/*.ipynb"
+      - "course-manifest.json"
       - "tools/**"
       - ".github/workflows/documind-dryrun.yml"
   workflow_dispatch:
@@ -36,6 +44,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Treat either curriculum marker as authoritative: losing one must not
+      # silently disable the private source gates on the curriculum checkout.
+      - name: Identify curriculum source layout
+        id: layout
+        env:
+          HAS_CURRICULUM: ${{ hashFiles('course-manifest.json', 'Module */**/*.ipynb') != '' }}
+        run: echo "curriculum=$HAS_CURRICULUM" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -57,6 +73,23 @@ jobs:
         uses: terraform-linters/setup-tflint@v4
         continue-on-error: true
 
+      - name: CI has the required build tools
+        run: |
+          terraform version
+          docker version
+
+      - name: All deploy Python files compile
+        run: python -m compileall -q deploy
+
+      - name: Deploy command regressions (offline)
+        run: python -m unittest discover -s deploy/commands/tests -v
+
+      - name: Operator regressions (offline)
+        run: python -m unittest discover -s deploy/operators/tests -v
+
+      - name: Corpus recovery regressions (offline)
+        run: python -m unittest discover -s deploy/evals/tests -v
+
       - name: Extraction is in sync with the notebooks
         run: python deploy/extract_documind.py --check
 
@@ -71,40 +104,68 @@ jobs:
       - name: Eval gate (offline)
         run: python deploy/evals/run_eval.py
 
+      - name: Notebook and deploy sync regressions (offline, curriculum source)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
+        run: python tools/check_notebook_sync.py
+
+      - name: Learner builder regressions (offline, curriculum source)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
+        run: python -m unittest discover -s tools -p test_build_learners.py -v
+
+      - name: Public runbook source setup regressions (offline, curriculum source)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
+        run: python -m unittest discover -s tools/tests -p test_build_rag_runbook_gitlinks.py -v
+
       # ---- the offline gates (12 September 2026). Each fails on the defect it was written for,
       # with fakes at the seam and no credential. check_local_lane.py is red today on a content
       # floor (the refusal and isolation rows: 4 of 18 refused, floor 0.3) and stays in the list
       # unmarked - a red gate is the signal, not a nuisance to continue past.
       - name: Gate - auth wiring (one credential on the wire, the tenant filter, the assertion)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_auth_wiring.py
       - name: Gate - the lane contract (one RAGAnswer, one collection, every query tenant-filtered)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_contract.py
       - name: Gate - lanes (the notebooks run what the kit ships)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_lanes.py
       - name: Gate - media contract (figure and segment citations)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_media_contract.py
       - name: Gate - graph backends (the walk, tenants apart, one tenant erased)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_graph_backends.py
       - name: Gate - one retrieval implementation under deploy/
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_one_retrieval.py
       - name: Gate - the real corpus (every golden figure survives chunking)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_real_corpus.py
       - name: Gate - the local lane (the tenant-filtered store, the refusal floor)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_local_lane.py
       - name: Gate - release safety (smoke-all's status, promotion by name, the audit lock, the sync, this workflow)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_release.py
       - name: Gate - authorization (each service binds exactly its callers)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_authz.py
       - name: Gate - the document lifecycle (the tombstone, the verified undo, the released claim)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_lifecycle.py
       - name: Gate - retrieval (the same predicates on every path, the bounded reranker, the packed set)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_retrieval.py
       - name: Gate - the evaluator (the scorer against a fake API)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_eval_gate.py
       - name: Gate - the Colab links (one learner branch, the right one)
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/check_colab_links.py
 
       # The from-scratch runbook (course-bibles/, 15 September 2026) is generated from deploy/ file by file;
-      # a kit change without a regeneration would hand an operator stale bytes. Absent (the learner repo): a no-op.
+      # a kit change without a regeneration would hand an operator stale bytes.
+      # The learner repo carries neither the runbook nor its private generator.
       - name: The from-scratch runbook is what deploy/ produces
+        if: ${{ steps.layout.outputs.curriculum == 'true' }}
         run: python tools/build_rag_runbook.py --check

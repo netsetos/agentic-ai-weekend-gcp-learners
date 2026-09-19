@@ -129,7 +129,8 @@ def current_chunks(db: firestore.Client, tenant_id: str, gcs_uri: str, doc_key: 
             continue
         d = snap.to_dict() or {}
         if embedding_model and (d.get("embedding_model") != embedding_model
-                                or str(d.get("embedding_version")) != str(embedding_version)):
+                                or str(d.get("embedding_version")) != str(embedding_version)
+                                or d.get("embedding_task_type") != "RETRIEVAL_DOCUMENT"):
             continue
         n += 1
     return n

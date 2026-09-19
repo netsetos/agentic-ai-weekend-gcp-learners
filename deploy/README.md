@@ -188,7 +188,32 @@ named stand-in) into an Ollama image on a Cloud Run L4 at min 0 / max 1 with a s
 GENERATOR_MODEL=documind-slm` puts it behind the API for the gate and the judge, `make compare` runs the
 honest comparison through the gateway, and `make slm-off` ends the day at zero. Optional and explicit:
 `make build-vllm deploy-vllm` (11.1's engine, a 13 GB image, a Hugging Face token with Gemma access in
-`hf-token`) and `make gke-up` / `make gke-down` (11.5's one-hour Autopilot comparison on the lane's VPC).
+`hf-token`) and `make gke-up` / `make gke-down` (11.5's Autopilot GPU comparison on the lane's VPC).
+
+**GKE disk-quota configuration (17 September 2026).** Module 4 ingestion, retrieval, generation,
+and the UI use Cloud Run; the GKE GPU workload is only for the optional Module 11.5 lesson.
+Terraform now defaults to `gke_autopilot=false`: a regional Standard control plane with ONE
+`e2-standard-2` CPU node in `REGION-a`, with a 30 GB `pd-standard` boot disk. The temporary
+bootstrap pool uses the same small standard disk before removal. The final pool has no
+autoscaling or upgrade surge; upgrades can interrupt this single-node lab. Standard disks
+consume `DISKS_TOTAL_GB`, not `SSD_TOTAL_GB`. Standard disk, CPU and IP quota must still be
+available, and temporary old-resource cleanup can overlap provisioning.
+
+The historical name `documind-autopilot` and Terraform address are retained for compatibility;
+inspect `terraform output -raw gke_mode` to see the selected mode. Applying this change to
+an existing Autopilot cluster REPLACES it and removes its GKE workloads. The seven Cloud Run
+services are independent of that cluster. Inspect a fresh full plan and account for any
+GKE workloads or volumes before accepting the replacement. Do not reuse an earlier plan.
+
+The Standard CPU lab cannot schedule the L4 manifest. `make gke-up` checks the actual
+cluster mode and explains this instead of leaving a GPU pod Pending. For Module 11.5,
+set `gke_autopilot=true` in your Terraform inputs, obtain sufficient SSD/GPU quota,
+review another cluster replacement, and apply before running the GPU target.
+The regional control-plane fee and the Standard CPU node continue while provisioned.
+
+References: [GKE boot disks](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/custom-boot-disks),
+[regional clusters with a single-zone pool](https://docs.cloud.google.com/kubernetes-engine/docs/how-to/creating-a-regional-cluster),
+[Compute disk quotas](https://docs.cloud.google.com/compute/resource-usage).
 
 Three cost controls sit under all of that (10 September, evening). *The ceiling*: `make gpu-cap` writes a
 consumer quota override of 1 on the region's L4 quotas (`services/slm/gpu_quota.py` reads the metric names
@@ -197,8 +222,9 @@ limit under every service's `--max-instances 1`. *The alarm*: `alerts.tf` raises
 `documind-slm` or `documind-vllm` has had an instance for two hours, to the on-call and to the admins'
 e-mail channel (`ALERT_EMAILS`, derived from `ADMIN_EMAILS`). *The switch*: `off.tf` runs the `documind-off`
 Cloud Run job at 23:00 IST - the gcloud image, the job's own account with actAs on the runtime accounts - which
-floors the GPU services, the gateway and the UI to zero wherever a floor is set and deletes a leftover Autopilot
-cluster; `make off` does the same by hand and `make off-now` runs the job.
+floors the GPU services, the gateway and the UI to zero wherever a floor is set. It does not remove
+Terraform's GKE cluster or Standard CPU node; `make down` tears those down. `make off` scales the
+services by hand and `make off-now` runs the job.
 
 Module 12 (10 September 2026, night) is the module the kit is extracted from, and its seams close the gap
 between what its files ship and what the lane calls. *The guard is a switch*: `ARMOR=on` on the API runs

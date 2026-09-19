@@ -41,6 +41,18 @@ resource "google_vertex_ai_index_endpoint" "documind" {
   public_endpoint_enabled = true
 }
 
+locals {
+  # Use the ACTUAL shard size returned by the index, including an existing index
+  # whose API-selected size was MEDIUM. Changing that index's shard_size is a
+  # replacement, so do not shrink it as an incidental deployment repair.
+  # These are the documented default machine types for each shard size.
+  vector_machine_by_shard = {
+    SHARD_SIZE_SMALL  = "e2-standard-2"
+    SHARD_SIZE_MEDIUM = "e2-standard-16"
+    SHARD_SIZE_LARGE  = "e2-highmem-16"
+  }
+}
+
 # An index and an endpoint are two things; neither of them serves a query. The
 # DEPLOYED index is the third, and it is the one that costs money per hour - which
 # is why it is easy to leave out of the terraform and then wonder why
@@ -51,10 +63,13 @@ resource "google_vertex_ai_index_endpoint_deployed_index" "documind" {
   deployed_index_id = "documind_chunks_v1"
   display_name      = "documind-chunks-v1"
 
-  # One small replica. This is the line to raise for a live cohort and the line
-  # to drop to zero afterwards - see the scale-down runbook in deploy/README.
+  # One compatible replica. MEDIUM/LARGE cost more than SMALL. A deployed index
+  # bills while serving; undeploy it to stop serving charges, rather than
+  # assuming that setting min_replica_count=0 is a supported shutdown path.
   dedicated_resources {
-    machine_spec { machine_type = "e2-standard-2" }
+    machine_spec {
+      machine_type = local.vector_machine_by_shard[google_vertex_ai_index.documind.metadata[0].config[0].shard_size]
+    }
     min_replica_count = 1
     max_replica_count = 1
   }

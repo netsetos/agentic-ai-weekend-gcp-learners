@@ -1,9 +1,5 @@
-data "google_billing_account" "acct" {
-  billing_account = var.billing_account_id
-}
-
 resource "google_billing_budget" "documind" {
-  billing_account = data.google_billing_account.acct.id
+  billing_account = upper(trimprefix(trimspace(var.billing_account_id), "billingAccounts/"))
   display_name    = "DocuMind monthly budget"
 
   budget_filter {
@@ -65,7 +61,19 @@ resource "google_pubsub_topic_iam_member" "budget_publisher" {
   member = "serviceAccount:billing-budget-alert@system.gserviceaccount.com"
 }
 
-variable "billing_account_id" { type = string }
+variable "billing_account_id" {
+  type        = string
+  nullable    = false
+  description = "The project's linked billing account ID, optionally prefixed with billingAccounts/."
+
+  validation {
+    condition = (
+      can(regex("^(billingAccounts/)?[0-9A-Za-z]{6}-[0-9A-Za-z]{6}-[0-9A-Za-z]{6}$", trimspace(var.billing_account_id))) &&
+      upper(trimprefix(trimspace(var.billing_account_id), "billingAccounts/")) != "000000-000000-000000"
+    )
+    error_message = "Set billing_account_id to the project's linked billing account ID (six alphanumeric characters per group: XXXXXX-XXXXXX-XXXXXX), optionally prefixed with billingAccounts/. Empty values and the 000000-000000-000000 placeholder are not allowed."
+  }
+}
 variable "alert_channels"     {
   type    = list(string)
   default = []

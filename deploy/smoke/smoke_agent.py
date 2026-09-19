@@ -2,12 +2,12 @@
 """Live smoke test for the A2A peer (lesson 8.4) - three protocols in one request, five checks.
 
     make smoke-agent PROJECT=...                      # from deploy/, after documind-agent is deployed
-    DOCUMIND_AGENT_URL=https://documind-agent-NUMBER.us-central1.run.app \\
+    DOCUMIND_AGENT_URL=https://documind-agent-NUMBER.REGION.run.app \\
       DOCUMIND_IMPERSONATE_SA=documind-ui-sa@PROJECT.iam.gserviceaccount.com python smoke/smoke_agent.py
 
     1. the agent card WITHOUT a token   -> refused by Cloud Run IAM (401/403): the peer is private
     2. the agent card with a token      -> 200, and the card's address is this service's url
-    3. message/send (the gratuity row)  -> a completed task whose answer came through documind-mcp
+    3. message/send (selected fixture) -> a completed task with the expected answer value
     4. message/send naming tenant zeta  -> the roster's refusal, relayed by the peer (its account is on acme only)
     5. message/send as the OUTSIDER, with a token -> 403 at the door (Cloud Run IAM). The peer has no roster of
        its own, so IAM is the only refusal it has; a project-wide roles/run.invoker made this call ANSWER until
@@ -19,11 +19,18 @@ A2A 1.x endpoint accepts (proven offline against a2a-sdk 1.1.2 + google-adk 2.8.
     {"role": "user", "kind": "message", "messageId": ..., "parts": [{"kind": "text", "text": ...}]}
 The identity is the CALLER's ID token, minted for THIS service's url; the peer speaks to the lane
 as documind-agent-sa - A2A carries no identity of its own, which is what check 4 demonstrates.
+
+DOCUMIND_SMOKE_QUESTION selects the question. The default gratuity question expects five years;
+the runbook's Acme probation question expects six months. Other questions require
+DOCUMIND_SMOKE_EXPECTED_PATTERN, a case-insensitive Python regex for their expected answer.
+Known fixture questions always use their own expectation. This checks the answer value and
+task completion; the API/MCP citation checkpoints separately verify grounded retrieval.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -33,9 +40,39 @@ import uuid
 AGENT_URL = os.environ.get("DOCUMIND_AGENT_URL", "").rstrip("/")
 IMPERSONATE = os.environ.get("DOCUMIND_IMPERSONATE_SA", "")
 OUTSIDER = os.environ.get("DOCUMIND_OUTSIDER_SA", "")
-QUESTION = os.environ.get("DOCUMIND_SMOKE_QUESTION",
-                          "After how many years of continuous service does gratuity become payable?")
+DEFAULT_QUESTION = "After how many years of continuous service does gratuity become payable?"
+PROBATION_QUESTION = "What is the probation period in the Acme HR policy?"
+QUESTION = os.environ.get("DOCUMIND_SMOKE_QUESTION", DEFAULT_QUESTION)
 passed, failed = [], []
+
+
+def expected_answer_pattern(question: str, custom_pattern: str = "") -> re.Pattern:
+    """Select an exact fixture; unknown questions must supply their expectation."""
+    normalize = lambda value: " ".join(value.casefold().split()).rstrip("?")
+    fixtures = {
+        normalize(DEFAULT_QUESTION): r"\b(?:five|5)(?:\s*\(\s*(?:five|5)\s*\))?[\s-]+years?\b",
+        normalize(PROBATION_QUESTION): r"\b(?:six|6)(?:\s*\(\s*(?:six|6)\s*\))?[\s-]+months?\b",
+    }
+    if not question.strip():
+        raise ValueError("DOCUMIND_SMOKE_QUESTION must not be empty")
+    pattern = fixtures.get(normalize(question)) or custom_pattern
+    if not pattern:
+        raise ValueError("Custom DOCUMIND_SMOKE_QUESTION requires DOCUMIND_SMOKE_EXPECTED_PATTERN")
+    compiled = re.compile(pattern, re.IGNORECASE)
+    if compiled.search(""):
+        raise ValueError("DOCUMIND_SMOKE_EXPECTED_PATTERN must require a nonempty answer value")
+    return compiled
+
+
+def task_answer_matches(status: int, response, text: str, expected: re.Pattern) -> bool:
+    if status != 200 or not isinstance(response, dict) or "error" in response:
+        return False
+    result = response.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("status"), dict):
+        return False
+    # Ignore presentation markup, not content, before checking the fixture value.
+    plain = re.sub(r"[*_`]", "", text or "")
+    return result["status"].get("state") == "completed" and bool(expected.search(plain))
 
 
 def ok(name, detail=""):
@@ -108,7 +145,13 @@ def main() -> int:
         print("DOCUMIND_AGENT_URL is not set - this is a LIVE test, run it after documind-agent is deployed.")
         print(__doc__)
         return 2
+    try:
+        expected = expected_answer_pattern(QUESTION, os.environ.get("DOCUMIND_SMOKE_EXPECTED_PATTERN", ""))
+    except (ValueError, re.error) as error:
+        print(f"STOP: {error}")
+        return 2
     print(f"\n  DocuMind A2A peer - live smoke test\n  target: {AGENT_URL}\n  " + "-" * 56)
+    print(f"  question: {QUESTION}\n  expected answer pattern: {expected.pattern}")
     card_path = "/.well-known/agent-card.json"
 
     # 1. private: the card is behind IAM
@@ -126,13 +169,16 @@ def main() -> int:
     else:
         bad("agent card", f"status={status} {str(card)[:120]}")
 
-    # 3. one task, answered through the MCP server
+    # 3. completed task and the selected fixture's answer value
     status, j, text = send(member, QUESTION)
-    state = (j.get("result", {}) if isinstance(j, dict) else {}).get("status", {}).get("state")
-    if status == 200 and text and ("five" in text.lower() or "5 years" in text.lower()):
+    result = j.get("result") if isinstance(j, dict) else None
+    task_status = result.get("status") if isinstance(result, dict) else None
+    state = task_status.get("state") if isinstance(task_status, dict) else None
+    if task_answer_matches(status, j, text, expected):
         ok("task answered", f"state={state}  {text[:90]!r}")
     else:
-        bad("task answered", f"status={status} state={state} text={text[:120]!r} err={(j.get('error') if isinstance(j, dict) else j)}")
+        bad("task answered", f"status={status} state={state} expected={expected.pattern!r} "
+            f"text={text[:300]!r} err={(j.get('error') if isinstance(j, dict) else j)}")
 
     # 4. the roster refusal, relayed: the peer's account is on acme only
     status, j, text = send(member, f"For tenant zeta: {QUESTION}")

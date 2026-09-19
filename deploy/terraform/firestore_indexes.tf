@@ -1,24 +1,16 @@
-# Two vector indexes, both 768-d to match text-embedding-005.
+# Firestore indexes used by the production RAG and graph paths.
 
-# chunks: the chaos fallback for retriever.py. Written by indexer.py on every
-# ingest; queried only when Vector Search is down.
+# chunks: vector fallback for retriever.py.
 resource "google_firestore_index" "chunks_vector" {
   project     = var.project_id
   database    = google_firestore_database.main.name
   collection  = "chunks"
   query_scope = "COLLECTION"
 
-  # Equality filter FIRST, vector field LAST. Firestore will not accept the
-  # reverse, and the error message points at an index name that looks correct.
   fields {
     field_path = "tenant_id"
     order      = "ASCENDING"
   }
-  # Firestore records the document key between the ordered fields and the vector field, and
-  # reports it back in that position. Declared here the same way, the provider reads the
-  # index it wrote. Left out, every apply read a three-field index against a two-field
-  # definition, planned a replacement, and the asynchronous deletion raced the re-creation
-  # into a 409 - the first live applies (the first live run, 6 September 2026) looped on exactly that.
   fields {
     field_path = "__name__"
     order      = "ASCENDING"
@@ -32,10 +24,7 @@ resource "google_firestore_index" "chunks_vector" {
   }
 }
 
-# chunks, current only: the ledger's promise (12.5, 11 September 2026). A SECOND index, not a change to the
-# first - a changed vector index is destroyed and re-created, and retrieval would be refused while it builds;
-# this one builds beside the first, and RETRIEVAL_CURRENT_ONLY=on on the API is what starts using it, after
-# `make backfill-current` has stamped the chunks written before the ledger.
+# CURRENT chunks only, for the ledger-aware fallback path.
 resource "google_firestore_index" "chunks_current_vector" {
   project     = var.project_id
   database    = google_firestore_database.main.name
@@ -63,16 +52,16 @@ resource "google_firestore_index" "chunks_current_vector" {
   }
 }
 
-# The API's filters on the Firestore path (12 September 2026, retriever.py's _firestore_fallback applies
-# doc_type and kind the way the Vector Search restricts do): Firestore refuses a vector query whose
-# equality filters have no matching index rather than degrade, so each combination the API can send has
-# one - with and without the ledger's `current`. Four indexes, built beside the two above.
+# Filter combinations used by the Firestore vector fallback. These already cover
+# individual and combined doc_type + kind filters, with and without CURRENT.
 locals {
   chunks_filter_indexes = {
-    doc_type         = ["tenant_id", "doc_type"]
-    current_doc_type = ["tenant_id", "current", "doc_type"]
-    kind             = ["tenant_id", "kind"]
-    current_kind     = ["tenant_id", "current", "kind"]
+    doc_type              = ["tenant_id", "doc_type"]
+    current_doc_type      = ["tenant_id", "current", "doc_type"]
+    kind                  = ["tenant_id", "kind"]
+    current_kind          = ["tenant_id", "current", "kind"]
+    doc_type_kind         = ["tenant_id", "doc_type", "kind"]
+    current_doc_type_kind = ["tenant_id", "current", "doc_type", "kind"]
   }
 }
 
@@ -103,8 +92,53 @@ resource "google_firestore_index" "chunks_filter_vector" {
   }
 }
 
-# answer_cache: the semantic cache from 12.6. Same shape, different collection -
-# and the tenant_id filter is what stops one customer's answer reaching another.
+# FirestoreGraph.expand() is an undirected walk. Each hop performs both of these
+# compound queries:
+#   graph_edges: tenant_id == tenant AND node_id IN (...)
+#   graph_edges: tenant_id == tenant AND dst_id  IN (...)
+# and then hydrates the reached nodes with:
+#   graph_nodes: tenant_id == tenant AND node_id IN (...)
+# Explicit indexes make a clean project reproducible instead of relying on a
+# console-generated FailedPrecondition link during the demo.
+locals {
+  graph_filter_indexes = {
+    edges_from = {
+      collection = "graph_edges"
+      fields     = ["tenant_id", "node_id"]
+    }
+    edges_to = {
+      collection = "graph_edges"
+      fields     = ["tenant_id", "dst_id"]
+    }
+    nodes_by_id = {
+      collection = "graph_nodes"
+      fields     = ["tenant_id", "node_id"]
+    }
+  }
+}
+
+resource "google_firestore_index" "graph_filter" {
+  for_each    = local.graph_filter_indexes
+  project     = var.project_id
+  database    = google_firestore_database.main.name
+  collection  = each.value.collection
+  query_scope = "COLLECTION"
+
+  dynamic "fields" {
+    for_each = each.value.fields
+    content {
+      field_path = fields.value
+      order      = "ASCENDING"
+    }
+  }
+
+  fields {
+    field_path = "__name__"
+    order      = "ASCENDING"
+  }
+}
+
+# answer_cache semantic vector index.
 resource "google_firestore_index" "answer_cache_vector" {
   project     = var.project_id
   database    = google_firestore_database.main.name
@@ -115,11 +149,6 @@ resource "google_firestore_index" "answer_cache_vector" {
     field_path = "tenant_id"
     order      = "ASCENDING"
   }
-  # Firestore records the document key between the ordered fields and the vector field, and
-  # reports it back in that position. Declared here the same way, the provider reads the
-  # index it wrote. Left out, every apply read a three-field index against a two-field
-  # definition, planned a replacement, and the asynchronous deletion raced the re-creation
-  # into a 409 - the first live applies (the first live run, 6 September 2026) looped on exactly that.
   fields {
     field_path = "__name__"
     order      = "ASCENDING"
@@ -133,12 +162,7 @@ resource "google_firestore_index" "answer_cache_vector" {
   }
 }
 
-# Retention (12 September 2026, deploy/INDEXING.md). The ledger retires a chunk row with a flag and a stamp -
-# expire_at = superseded_at + retention_days (variables.tf; the worker reads it as RETENTION_DAYS) - and this
-# TTL policy is the ONLY thing that ever deletes one: the platform removes the row within about a day of the
-# stamp, no account on the lane needs a delete, no cron runs one. The window is the audit window (a citation
-# can still open what it quoted) and the undo window (reactivate clears the stamp) at once. A staged version
-# the worker never swapped carries a one-day stamp and leaves the same way.
+# TTL for superseded/staged chunk rows.
 resource "google_firestore_field" "chunks_expire_at" {
   project    = var.project_id
   database   = google_firestore_database.main.name
@@ -148,9 +172,7 @@ resource "google_firestore_field" "chunks_expire_at" {
   ttl_config {}
 }
 
-# The answer cache (12.6, SEMANTIC_CACHE=on, 12 September 2026) stamps every entry with
-# expire_at = created + SEMANTIC_CACHE_TTL_H, and this policy is what removes it; the lookup skips an
-# expired entry the policy has not reached yet, so the ceiling holds either way.
+# TTL for semantic-cache entries.
 resource "google_firestore_field" "answer_cache_expire_at" {
   project    = var.project_id
   database   = google_firestore_database.main.name
@@ -160,17 +182,13 @@ resource "google_firestore_field" "answer_cache_expire_at" {
   ttl_config {}
 }
 
-# The roster's reverse lookup (shared/tenancy.py tenant_for, lesson 12.8: "which tenant is
-# this person on?") is a COLLECTION-GROUP query on members.email, across every tenant's
-# members at once. Firestore indexes a single field at collection scope by default and
-# refuses a collection-group query on it - the UI's first page was a FailedPrecondition
-# on the first live sign-in (the first live run, 6 September 2026). This field override adds the
-# collection-group index; the point lookup (is_member) reads by document id and needs none.
+# Roster reverse lookup: COLLECTION_GROUP query on members.email.
 resource "google_firestore_field" "members_email" {
   project    = var.project_id
   database   = google_firestore_database.main.name
   collection = "members"
   field      = "email"
+
   index_config {
     indexes {
       order       = "ASCENDING"

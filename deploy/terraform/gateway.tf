@@ -54,6 +54,8 @@ resource "google_sql_database_instance" "gateway" {
   deletion_protection = false
 
   settings {
+    # PostgreSQL 16 defaults to Enterprise Plus; shared-core tiers require Enterprise.
+    edition           = "ENTERPRISE"
     tier              = "db-f1-micro"
     availability_type = "ZONAL"
     disk_size         = 10

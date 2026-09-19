@@ -48,7 +48,7 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    `shared/documind_corpus.py`, so a notebook mints the same chunk texts, hashes and locators - the gate holds a
    29-page mirror to 65 identical chunks from either chunker (12 September 2026). One DLP scan per document.
 4. **Carry-over.** The previous version's current rows of this source are read by hash; a vector is reused only
-   when its `embedding_model@embedding_version` is the configured one. The misses are embedded. `reused` and
+   when its model, version, `RETRIEVAL_DOCUMENT` task stamp and 768-dimensional vector match the configured profile. The misses are embedded. `reused` and
    `embedded` are the counts every later line carries.
 5. **Stage.** The new rows are written with `current=false, staged=true` and a one-day `expire_at` (a stage nothing
    ever swaps leaves by policy). No reader can see them.
@@ -75,7 +75,7 @@ One object under `gs://PROJECT-uploads/<tenant>/<name>` changes (same name, new 
    nothing is flipped, and the worker takes the claim back and ingests the bytes as a fresh version (step 3 on;
    the carry-over reuses what the newer version still holds). Otherwise the rows come back with their stamps
    cleared, their ids go back up into the ANN tier from the rows' own vectors (`reupsert`) *before* the newer
-   version is retired in turn, and nothing is embedded (`ingest_reactivated`); the managed mirror follows the undo
+   version is retired in turn. Matching document embeddings are reused; legacy or missing vectors are regenerated and persisted before reuse (`ingest_reactivated`); the managed mirror follows the undo
    - the reactivated version's text read off its own rows, the newer version deleted (`after_undo`). The first
    undo flipped whatever
    remained and retired the newer version regardless; after the window, that left a source with no current
@@ -152,8 +152,8 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
 | One document changed | `make reindex FILE=<new> NAME=<same name> TENANT=<t>` (the offline gate runs first), then move the golden rows it turned red, then `make eval-live SOURCE=<name> API=<candidate>` | `ingest_ok` with `reused`, `embedded`, `retired`; `ingest_superseded`; the scoped gate green |
 | Only metadata changed | nothing | the night's reconcile records the generation: *touch* |
 | A late redelivery of an old version | nothing | `ingest_stale_event`; the ledger untouched |
-| The same version from the notebook lane (4.1's Document AI ingester, 2.3 / 4.2 / 4.5's `seed()`), uploaded to the bucket | nothing | `ingest_already_current`: the claim recorded with the rows already current, the ledger learns the generation, nothing parsed or embedded. Both lanes name a version by the sha of the OBJECT (a real Act's PDF, never its mirror), so neither re-issues the other's rows; the other order needs nothing - `seed()` skips a version the lane holds (13 September 2026) |
-| The change was wrong | `make reindex FILE=<old> NAME=<same name>` | `ingest_reactivated`, nothing embedded - inside the `RETENTION_DAYS` undo window; after it, `reactivate_incomplete` then `ingest_ok` (a fresh version, the carry-over paying only for what changed) |
+| The same version from the notebook lane (4.1's Document AI ingester, 2.3 / 4.2 / 4.5's `seed()`), uploaded to the bucket | nothing | `ingest_already_current`: the claim recorded with the rows already current, the ledger learns the generation, nothing parsed or embedded when all embedding stamps match. Unstamped legacy rows are not adopted. Both lanes name a version by the sha of the OBJECT (a real Act's PDF, never its mirror), so neither re-issues the other's rows; the other order needs nothing - `seed()` skips a version the lane holds (13 September 2026) |
+| The change was wrong | `make reindex FILE=<old> NAME=<same name>` | `ingest_reactivated`, matching document embeddings reused (legacy vectors repaired) - inside the `RETENTION_DAYS` undo window; after it, `reactivate_incomplete` then `ingest_ok` (a fresh version, the carry-over paying only for what changed) |
 | A document withdrawn on purpose | `make retire SOURCE=` | `reconcile_withdrawn`: the ledger row `withdrawn`, the object kept, the rows expiring after `RETENTION_DAYS`; every night the plan says *withdrawn, object kept* and does nothing; the same bytes again are `ingest_withdrawn` |
 | A document deleted from the bucket | delete the object | retired by the night's walk (`reconcile_retired`, the row `retired`); put the object back and the next walk re-ingests it |
 | Bring a withdrawn document back | `make restore SOURCE=` | `reconcile_restored`, then `ingest_reactivated` inside the undo window or `ingest_ok` after it; refused with the reason when the source is not withdrawn or its object is gone |
@@ -163,7 +163,7 @@ runs uncached on a mismatch (`cache_stale`), until `make cache` packs the corpus
 | The graph after a reindex | `make graph TENANT=` (`GRAPH_ARGS="--source hr_policy_2026.md"` for one document's graph, deterministically; the corpus otherwise; `GRAPH_BACKEND=spanner` writes it to Spanner Graph with each name's embedding) | `graph_built` with nodes and edges; only chunks whose `chunk_hash` changed are re-extracted (`graph_extractions/`), the rest is cached |
 | Many documents changed | `make ingest-corpus`, `make reconcile APPLY=1` | per-source counts; `reconcile_done` with `drift` 0 the night after |
 | Is the ANN tier holding the corpus? | `make vector-status` (`make wait-vectors WANT=200` to block until it is) | the index's own `vectorsCount` and the endpoint's deployed index; 0 right after `make up` is correct - vector.tf creates the index empty, the worker fills it |
-| The tier is empty and Firestore is not | `make backfill-vectors APPLY=1` (`TENANT_ONLY=` one tenant; without `APPLY=1` it counts) | `backfill_vectors` with the datapoints streamed up from the rows' own embeddings, nothing embedded - a worker deployed before the index existed, or an apply that lost its index |
+| The tier is empty and Firestore is not | `make backfill-vectors APPLY=1` (`TENANT_ONLY=` one tenant; without `APPLY=1` it counts) | `backfill_vectors` reuses matching document embeddings; missing, unstamped or incompatible vectors are regenerated and checkpointed in Firestore after ANN upsert |
 | Seed the graph walk by meaning | `make graph TENANT= GRAPH_BACKEND=spanner GRAPH_ARGS="--source hr_policy_2026.md"`, then `make candidate GRAPH_BACKEND=spanner RETRIEVAL_GRAPH=auto` | `graph.py --backend spanner --ask "who signs off on a big purchase?"` seeds the CFO with no stored name in the question (`seeded_by: meaning`, each seed's cosine distance); the answer's `stages.graph_chunks` > 0 on the candidate |
 | Did the index answer, or the rung beneath it? | any `/v1/query`: `stages.retrieval_backend` and `stages.vector_chunks`; `make smoke` | `vector_chunks > 0` on a `vector` request is the index; 0 is the Firestore rung and one `vector_search_fallback` line in the log |
 | Which version is live? | `make sources TENANT_ONLY=acme`, the UI's Documents page, `GET /v1/sources?tenant_id=` | every source's version, generation, counts, dates, the fingerprint |
@@ -229,3 +229,136 @@ Where each answer lives here: `services/ingest/` (the path), `services/rag-api/r
 `cache_manager.py` (the reader), `terraform/` (the policies), `evals/` and `smoke/` (the proof),
 `shared/documind_corpus.py` (the notebooks' copy of the rules), and lessons 4.1, 4.2, 4.5, 4.7, 4.8, 12.2, 12.3,
 12.5, 12.7, 12.8 and 13.1 to 13.3 (the teaching).
+
+
+## Repair document embeddings and verify HR retrieval
+
+The 17 September Acme failure retrieved five repeated performance-review clauses while PB-02 was absent
+from the model context. Ingestion was complete (283 current chunks); neither that count nor a successful
+HTTP response proves retrieval quality. PB-02 says **six months on probation at grade E2**; its 15 days is
+notice during probation, a different fact.
+
+The worker formerly omitted `task_type`. Google's text-embedding API defaults an omitted task to
+`RETRIEVAL_QUERY`; documents must use `RETRIEVAL_DOCUMENT`, while the API's question embedding remains
+`RETRIEVAL_QUERY`. See [Google's task-type documentation](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/model-reference/text-embeddings-api).
+This is a concrete encoding defect; its contribution to a particular deployed retrieval miss must be
+measured with the live acceptance check after migration.
+
+`indexer.py` now explicitly requests document embeddings and stamps `embedding_task_type` on canonical
+chunk rows. Carry-over, notebook adoption, vector backfill and undo reject the legacy task profile.
+Simply rebuilding the worker or uploading unchanged bytes does not migrate existing indexed claims.
+`reconcile.py --backfill-vectors` now performs that repair in batches of 100 and preserves text, source
+URIs, chunk IDs and generations. A preview reports `needs_document_embedding`; `--apply` embeds stale
+rows, upserts ANN, then checkpoints vectors and task stamps in Firestore. Successful batches reuse their
+vectors on retry. Failed writes are surfaced, not marked successful. Source-ledger `embedded/reused`
+counts still describe the original ingestion, not this maintenance operation.
+
+Run this during an ingestion maintenance window: stop uploads/undo/notebook seeding and wait for active
+ingest/batch work to finish. Keep semantic answer caches off for the verification (the runbook default);
+existing cache entries are not invalidated by this same-content repair, so expire them before enabling
+cache again. Firestore uses last-update preconditions, but ANN and Firestore are not one transaction.
+On a concurrent-change failure stop writers and resolve the affected source before retrying. The in-place
+repair is intended for this workshop; a production zero-downtime embedding release should use a candidate
+index and switch after acceptance. Embedding API usage is billable.
+
+Fetch and deploy the corrected worker from the branch, then repair Acme. The subshell preserves the other
+services' existing source stamps and stores the new ingest stamp separately. Terraform resources and the
+API image are unchanged. Existing batch/reconcile jobs using ingest code are updated to the same image.
+
+```bash
+(
+  set -euo pipefail
+  : "${DEMO_ROOT:?Restore the deployment directory}"
+  : "${PROJECT:?Restore the intended project ID}"
+  : "${REGION:?Restore the deployment region}"
+  cd "$DEMO_ROOT"
+  source "$HOME/rag-shell-venv/bin/activate"
+  source "$HOME/rag-git-source.sh"
+  mkdir -p operator-evidence
+  export SOURCE_BRANCH=claude/rag-production-hardening
+  export RAG_SOURCE_REPO="${RAG_SOURCE_REPO:-$HOME/documind-rag-source}"
+  # Preserve the source stamp used by the other deployed services.
+  export RAG_SESSION_FILE="$DEMO_ROOT/operator-evidence/document-embedding-source.env"
+  rag_refresh_source
+  for path in services/ingest/indexer.py services/ingest/idempotency.py services/ingest/reconcile.py commands/tests/test_document_embeddings.py INDEXING.md; do
+    rag_get_file "$path"
+  done
+  python -m unittest discover -s commands/tests -p test_document_embeddings.py
+
+  # Build only the ingest image, from one complete Git snapshot.
+  RAG_BUILD_CONTEXT=$(mktemp -d)
+  trap 'rm -rf -- "$RAG_BUILD_CONTEXT"' EXIT
+  git -C "$RAG_SOURCE_REPO" archive "$SOURCE_COMMIT" deploy/services deploy/shared deploy/cloudbuild.yaml \
+    | tar -x -C "$RAG_BUILD_CONTEXT" --strip-components=1
+  RAG_REPAIR_IMAGE="$REGION-docker.pkg.dev/$PROJECT/documind/ingest:$SOURCE_COMMIT"
+  gcloud builds submit "$RAG_BUILD_CONTEXT" --project="$PROJECT" --region="$REGION" \
+    --config="$RAG_BUILD_CONTEXT/cloudbuild.yaml" \
+    --service-account="projects/$PROJECT/serviceAccounts/sa-documind-cicd@$PROJECT.iam.gserviceaccount.com" \
+    --gcs-source-staging-dir="gs://$PROJECT-rag-build-source/source" \
+    --substitutions="_IMAGE=$RAG_REPAIR_IMAGE,_DOCKERFILE=services/ingest/Dockerfile"
+  gcloud run services update documind-ingest --project="$PROJECT" --region="$REGION" \
+    --image="$RAG_REPAIR_IMAGE"
+  # Upgrade any existing batch/reconcile consumers of the same ingest code.
+  gcloud run jobs list --project="$PROJECT" --region="$REGION" --format=json \
+    > operator-evidence/document-embedding-jobs.json
+  python - <<'PY' > operator-evidence/document-embedding-jobs.txt
+import json
+from pathlib import Path
+for job in json.loads(Path('operator-evidence/document-embedding-jobs.json').read_text()):
+    name = (job.get('metadata', {}).get('name') or job.get('name', '')).rsplit('/', 1)[-1]
+    if name in {'documind-ingest-batch', 'documind-reconcile'}:
+        print(name)
+PY
+  while IFS= read -r job; do
+    gcloud run jobs update "$job" --project="$PROJECT" --region="$REGION" --image="$RAG_REPAIR_IMAGE"
+  done < operator-evidence/document-embedding-jobs.txt
+  printf 'Ingest image: %s\n' "$RAG_REPAIR_IMAGE" \
+    > operator-evidence/document-embedding-image.txt
+
+  export GOOGLE_CLOUD_PROJECT="$PROJECT" PYTHONPATH="$DEMO_ROOT:$DEMO_ROOT/services/ingest"
+  export MANAGED_MIRROR=off
+  export VECTOR_INDEX_NAME="$(terraform -chdir=terraform output -raw vector_index_name)"
+  test -n "$VECTOR_INDEX_NAME"
+  unset VECTOR_DRY_RUN
+  # Default repair scope is Acme. Rerun with RAG_REPAIR_TENANT=zeta or globex for those tenants.
+  RAG_REPAIR_TENANT="${RAG_REPAIR_TENANT:-acme}"
+  python services/ingest/reconcile.py --project "$PROJECT" --tenant "$RAG_REPAIR_TENANT" --backfill-vectors \
+    | tee operator-evidence/document-embedding-preview.json
+  python services/ingest/reconcile.py --project "$PROJECT" --tenant "$RAG_REPAIR_TENANT" --backfill-vectors --apply \
+    | tee operator-evidence/document-embedding-applied.json
+  python services/ingest/reconcile.py --project "$PROJECT" --tenant "$RAG_REPAIR_TENANT" --backfill-vectors \
+    | tee operator-evidence/document-embedding-after.json
+  python - <<'PY'
+import json
+from pathlib import Path
+report = json.loads(Path('operator-evidence/document-embedding-after.json').read_text())
+assert report['current_chunks'] > 0, 'STOP: no current chunks for this tenant'
+assert report['invalid_chunks'] == 0, 'STOP: invalid canonical chunks'
+assert report['needs_document_embedding'] == 0, 'STOP: unfinished embedding repair; rerun backfill'
+print('PASS: current chunks have document embeddings. Prove live retrieval with the original question next.')
+PY
+)
+```
+
+The same backfill CLI can migrate Zeta and Globex without rebuilding the image again; pass `--tenant zeta`
+or `--tenant globex` and the same project/index/model/version environment. Keep `EMBEDDING_MODEL` and
+`EMBEDDING_VERSION` equal to the deployed API (the runbook uses `text-embedding-005` and `1`). A full model
+or dimensionality change is a separate release, not this task-type correction.
+
+After the final preview reports zero stale vectors, refresh the member token and repeat the original
+probation question. ANN propagation can lag an accepted upsert; a global datapoint count cannot show that
+an existing vector was replaced. Accept only an answer with `answerable=true`, a citation to the current
+Acme HR policy supporting PB-02, six months, and `stages.vector_chunks > 0`. For SSE, `citation` events
+identify the context sent to the generator, not proof that the generated answer is supported. Inspect the
+answer as well. If performance-review passages still dominate after propagation, keep the gate failed and
+inspect candidate IDs/ranker results; do not claim resolution by changing the question or increasing request
+`top_k` (that changes the selected context size, not the initial 20-candidate pool).
+
+Offline regression coverage includes document task type, malformed embedding responses, task-aware reuse,
+tenant isolation, undo, adoption, failed upserts/commits, resume and concurrent-change preconditions:
+
+```bash
+python -m unittest discover -s commands/tests -p test_document_embeddings.py
+```
+
+These tests do not measure live Vertex retrieval quality.

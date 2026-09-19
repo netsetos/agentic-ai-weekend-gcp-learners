@@ -196,7 +196,10 @@ def main() -> int:
     ap.add_argument("--seed-distance", type=float, default=0.4,
                     help="--ask on spanner: the largest cosine distance a name may have and still seed the walk (the API's GRAPH_SEED_DISTANCE)")
     args = ap.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stdout)
+    # --ask is consumed as one JSON document. SDK session/HTTP logs belong on
+    # stderr; build mode retains stdout events for the runbook's build log gate.
+    logging.basicConfig(level=logging.INFO, format="%(message)s",
+                        stream=sys.stderr if args.ask else sys.stdout)
     from google.cloud import firestore
     from shared.documind_graph import FirestoreGraph, SpannerGraph, graph_chunk_ids, walk
     db = firestore.Client(project=args.project)

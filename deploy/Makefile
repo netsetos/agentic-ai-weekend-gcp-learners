@@ -27,7 +27,7 @@
 #
 # ONE SHAPE (15 September 2026; the lean | full switch is gone): seven Cloud Run services - the ingest worker, the
 # API, the admin console, the UI, the chat service on its Cloud SQL checkpointer, the MCP server and the A2A peer -
-# Firestore with its vector indexes, Vector Search and its endpoint, the Spanner Graph trial, the Autopilot cluster,
+# Firestore with its vector indexes, Vector Search and its endpoint, Spanner Graph, the GKE lab cluster,
 # the BigQuery mirror and Dataplex scan, the log sink, Cloud Deploy, the managed stores of 4.3 and 4.4, one Document
 # AI processor, the buckets, the accounts, secrets, budget and alerts. See README.md.
 #
@@ -585,9 +585,10 @@ smoke:
 	$(PY) smoke/smoke.py
 
 # The MCP server's smoke test (7.2): health, the four tools, a cited answer as a roster member,
-# and the outsider account refused by the roster. Needs `pip install --user fastmcp==3.4.7`.
+# and the outsider account refused by the roster. Activate the operator venv, then run: python -m pip install 'fastmcp==3.4.7'.
 smoke-mcp: guard-project
-	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
+	@NUMBER=$$(gcloud projects describe "$(PROJECT)" --format='value(projectNumber)') || exit 1; \
+	case "$$NUMBER" in ''|*[!0-9]*) echo 'ERROR: gcloud did not return a project number; no smoke request sent.' >&2; exit 1;; esac; \
 	DOCUMIND_MCP_URL=https://documind-mcp-$$NUMBER.$(REGION).run.app \
 	DOCUMIND_IMPERSONATE_SA=documind-ui-sa@$(PROJECT).iam.gserviceaccount.com \
 	DOCUMIND_OUTSIDER_SA=documind-outsider-sa@$(PROJECT).iam.gserviceaccount.com \
@@ -764,11 +765,13 @@ vllm-off: guard-project
 	gcloud run services update documind-vllm --region $(SLM_REGION) --project $(PROJECT) --min-instances 0 --quiet
 	@echo "documind-vllm scaled to zero"
 
-# 11.5's comparison: the Autopilot cluster is Terraform's (gke.tf; make up creates it, make down removes it), so these
-# two apply and delete the WORKLOAD - the vLLM manifest with the image make build-vllm pushed, one request through a
-# port-forward - and the L4 node it asks for, which is what bills while the pod runs. The cluster's own fee is the
-# shape's, not the hour's.
+# 11.5's GPU comparison requires gke_autopilot=true and sufficient SSD/GPU quota.
+# The default Standard lab has one small CPU node and cannot schedule this GPU pod.
+# Changing gke_autopilot replaces the cluster; review/apply that Terraform plan first.
+# These targets manage the workload only. The cluster remains until make down.
 gke-up: guard-project
+	@MODE=$$(gcloud container clusters describe documind-autopilot --region $(REGION) --project $(PROJECT) --format='value(autopilot.enabled)') || exit $$?; \
+	  case "$$MODE" in True|true) ;; *) echo "STOP: the Standard CPU lab cannot run the L4 GPU lesson. Set gke_autopilot=true in Terraform, review cluster replacement and quota, and apply before make gke-up." >&2; exit 1 ;; esac
 	gcloud container clusters get-credentials documind-autopilot --region $(REGION) --project $(PROJECT)
 	IMAGE=$(IMAGE_REPO)/gemma-vllm:latest envsubst < gke/vllm-deployment.yaml | kubectl apply -f -
 	@echo ">> kubectl get pods -w   (an accelerator node takes minutes); then: kubectl port-forward svc/documind-vllm 8080:80"
@@ -776,7 +779,7 @@ gke-up: guard-project
 gke-down: guard-project
 	-gcloud container clusters get-credentials documind-autopilot --region $(REGION) --project $(PROJECT)
 	-IMAGE=$(IMAGE_REPO)/gemma-vllm:latest envsubst < gke/vllm-deployment.yaml | kubectl delete -f - --ignore-not-found
-	@echo "the vLLM workload is gone and its node with it; documind-autopilot stays (gke.tf) - make down removes the cluster"
+	@echo "vLLM workload removed; the cluster and any Standard lab node remain (gke.tf) - make down removes them"
 
 # The honest comparison (10.6, 11.4): the same golden rows, retrieval once through the one retrieve(), every backend
 # answering from the same context through the gateway. The four numbers, and the SLM's rupees are a RATE.

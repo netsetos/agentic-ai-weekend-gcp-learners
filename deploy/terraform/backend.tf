@@ -12,11 +12,19 @@ terraform {
   }
 }
 
+# Client-based APIs (including Billing Budgets) need an explicit quota project
+# with user ADC. Both providers send X-Goog-User-Project using the resource
+# project, not gcloud's shared OAuth project. Enable the APIs there and grant
+# the operator serviceusage.services.use. This does not change the GCS backend.
 provider "google" {
-  project = var.project_id
-  region  = var.region
+  project               = var.project_id
+  region                = var.region
+  user_project_override = true
+  billing_project       = var.project_id
 }
 provider "google-beta" {
-  project = var.project_id
-  region  = var.region
+  project               = var.project_id
+  region                = var.region
+  user_project_override = true
+  billing_project       = var.project_id
 }

@@ -32,13 +32,15 @@ for who in documind-ui-sa documind-agent-sa documind-outsider-sa; do
 done
 
 # ---- SMOKE ----
-# from deploy/, after `pip install --user fastmcp==3.4.7`
-make smoke-mcp PROJECT=$PROJECT
+# From deploy/, with the runbook virtual environment active:
+# python -m pip install 'fastmcp==3.4.7'
+# python -m pip check
+make smoke-mcp PROJECT="$PROJECT" REGION="${REGION:-us-central1}"
 
 # the same by hand: health through the IAM ingress, then tools/list as JSON-RPC over streamable HTTP
-TOK=$(gcloud auth print-identity-token --include-email --impersonate-service-account=documind-ui-sa@$PROJECT.iam.gserviceaccount.com --audiences=https://documind-mcp-$PROJECT_NUMBER.us-central1.run.app)
-curl -sSf -H "Authorization: Bearer $TOK" https://documind-mcp-$PROJECT_NUMBER.us-central1.run.app/health
+TOK=$(gcloud auth print-identity-token --include-email --impersonate-service-account=documind-ui-sa@$PROJECT.iam.gserviceaccount.com --audiences=https://documind-mcp-$PROJECT_NUMBER.${REGION:-us-central1}.run.app)
+curl -sSf -H "Authorization: Bearer $TOK" https://documind-mcp-$PROJECT_NUMBER.${REGION:-us-central1}.run.app/health
 curl -sS -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}' \
-  https://documind-mcp-$PROJECT_NUMBER.us-central1.run.app/mcp
+  https://documind-mcp-$PROJECT_NUMBER.${REGION:-us-central1}.run.app/mcp
 
