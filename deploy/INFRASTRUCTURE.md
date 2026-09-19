@@ -7,6 +7,11 @@ Terraform replacements into the terminal.
 
 ## What is fixed
 
+- `terraform/dataplex.tf` enables the Dataplex API, explicitly creates or reuses
+  its Google-managed service identity, grants `roles/dataplex.serviceAgent`, and
+  only then creates the data-quality scan. API enablement alone did not guarantee
+  that the service account existed in a new project. The existing scan ID, BigQuery
+  tables and GKE resources are unchanged.
 - `terraform/managed.tf` declares the existing default digital parser explicitly.
   Removing an implicit `document_processing_config` used to propose replacing
   Acme and Zeta's search stores on a second plan. Their names, IDs, data and schema
@@ -166,6 +171,25 @@ The input and selected-plan records remain on disk. Start with the `plan` comman
 again if an apply was interrupted or you are unsure whether state changed. No
 shell-defined billing or promotion function is needed for these infrastructure
 commands.
+
+## Dataplex service account missing after a partial apply
+
+If the scan reports that `service-PROJECT_NUMBER@gcp-sa-dataplex.iam.gserviceaccount.com`
+does not exist, update the deployment source from Git using step 1 above. The
+identity and its role are now managed in Terraform; no local Terraform edits or
+replacement service account are needed.
+
+Keep the same project, backend and workspace. Run a new `plan`, review it, and run
+`apply` using steps 3 and 4. Do not reuse the plan from the interrupted apply.
+Terraform retains successfully created resources recorded in that state, including
+the node pool. This repair should add the service-identity/IAM prerequisites and
+the missing scan, with no resource deletions or replacements.
+
+Google Cloud can still take a few minutes to propagate a newly created service
+identity or its IAM grant. If the same error persists immediately after their
+successful creation, allow a few minutes, then create and review another plan
+before retrying. Repeated permission errors need investigation; a longer scan
+timeout alone does not fix a missing identity or grant.
 
 ## Verification and limits
 

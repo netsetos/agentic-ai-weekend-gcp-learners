@@ -22,6 +22,22 @@ resource "google_project_service" "dataplex" {
   disable_on_destroy = false
 }
 
+# Enabling the API does not ensure its service agent exists on a new project.
+# Generate (or reuse) it before granting its service role and creating the scan.
+resource "google_project_service_identity" "dataplex" {
+  provider = google-beta
+  project  = var.project_id
+  service  = google_project_service.dataplex.service
+}
+
+# Proactively generated service agents need their normal service-agent role.
+# An additive member preserves the project's other IAM bindings.
+resource "google_project_iam_member" "dataplex_service_agent" {
+  project = var.project_id
+  role    = "roles/dataplex.serviceAgent"
+  member  = "serviceAccount:${google_project_service_identity.dataplex.email}"
+}
+
 resource "google_bigquery_dataset" "rag_data" {
   dataset_id                 = "rag_data"
   location                   = var.india_region
@@ -174,7 +190,7 @@ resource "google_dataplex_datascan" "chunk_dq" {
     }
   }
 
-  depends_on = [google_project_service.dataplex]
+  depends_on = [google_project_iam_member.dataplex_service_agent]
 }
 
 output "chunk_dq_scan" { value = google_dataplex_datascan.chunk_dq.name }
