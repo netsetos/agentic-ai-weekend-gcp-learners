@@ -1,13 +1,15 @@
 # DocuMind AI — deploy kit & live-session dry run
 
-A repeatable way to **validate** (and, on GCP, **stand up**) the whole DocuMind AI
-stack that Module 12 builds — so live-session day isn't a coin flip.
+A repeatable way to **validate** (and, on GCP, **stand up**) the DocuMind AI stack.
 
-> **The notebooks are the single source of truth.** Every file under
-> `terraform/` and `services/` is *extracted* from the eight Module 12 notebooks
-> by `extract_documind.py`. Don't hand-edit the extracted tree — fix the
-> notebook heredoc and re-extract (`python tools/readopt.py <notebook> VAR <file>`
-> pushes a file edited on disk back into its heredoc). CI checks the two never drift.
+> **On `prod_agent`, the committed `deploy/` tree is the source to run and maintain.**
+> This branch has no course module folders or notebooks. Edit the deployment files
+> directly and run the offline checks below. `extract_documind.py` is retained for
+> the separate curriculum checkout; without its private `Module */` notebooks it
+> performs no extraction, and the extraction freshness check is skipped.
+
+Lesson numbers below record the kit's course history; they do not refer to files
+available on this branch.
 
 ## Workstation infrastructure recovery and reruns
 
@@ -19,8 +21,9 @@ source downloads do not require switching CI trust to the learners repository.
 
 `make plan` prepares and checks a saved plan; `make up` now requires that selected,
 reviewed plan before it applies infrastructure and continues service setup. Live
-plan/up no longer regenerate deployment source. Maintainers still keep extracted
-source and its authoritative lesson copies in sync through the offline check.
+plan/up no longer regenerate deployment source. On this branch, validate changes
+against the committed deployment files; notebook synchronization belongs to the
+separate curriculum checkout.
 
 ---
 
@@ -55,9 +58,11 @@ step that touches the network; `shared/documind_corpus.py` is the one loader and
 same code 2.3 and Module 4's notebooks paste and `tools/check_real_corpus.py` gates.
 
 ```bash
+cd deploy                            # from the repository root
 pip install -r services/chat/requirements.txt -r services/chat/requirements-local.txt
 ollama pull gemma3:4b
-cd deploy && make chat-local          # seeds the corpus, serves on http://127.0.0.1:8081
+make chat-local                      # seeds the corpus, serves on http://127.0.0.1:8081
+# In a second terminal while the service is running:
 curl -s localhost:8081/v1/chat -H 'content-type: application/json' -d '{"question":"What is the notice period?"}'
 ```
 
@@ -69,17 +74,18 @@ that is wrong here is wrong in production too — that is the point of the lane.
 ## Tier A — offline (`make dryrun`)
 
 ```bash
-python deploy/extract_documind.py      # regenerate the tree from the notebooks
-python deploy/validate.py              # run all offline checks
+# From the repository root:
+python deploy/validate.py             # validate the committed deployment tree
+python deploy/evals/run_eval.py       # run the offline eval gate
 # or, with make:
-cd deploy && make dryrun
+make -C deploy dryrun
 ```
 
 `validate.py` runs ten checks (`PASS` / `WARN` / `FAIL` / `SKIP`):
 
 | Check | What it proves |
 |---|---|
-| `extract` | the deploy tree matches the notebooks (no drift) |
+| `extract` | checks notebook drift in the curriculum checkout; `SKIP` on this branch because no curriculum notebooks are present |
 | `py_compile` | every service + smoke `.py` parses |
 | `imports` | no unresolved local imports (a service isn't missing a module) |
 | `requirements` | every dependency is version-pinned |
@@ -471,13 +477,14 @@ deploy/
 └── commands/             # reference gcloud/terraform blocks from the notebooks
 ```
 
-Regenerate anytime: `python deploy/extract_documind.py`.
+Regeneration with `python deploy/extract_documind.py` is available only in the
+separate curriculum checkout. On `prod_agent`, maintain the committed files directly.
 
 ## Who explains what
 
-Every file in this tree is accounted for by a notebook, and [`INDEX.md`](INDEX.md) says how: **A** owned (extracted
+[`INDEX.md`](INDEX.md) records the kit's curriculum provenance: **A** owned (extracted
 verbatim from a heredoc in a Module 12, 7.1, 7.2 or 8.4 notebook), **B** pasted (a block the notebooks carry verbatim:
 the corpus loader), **C** used (imported, read, run or excerpted from the clone by a notebook's code), **D** named in
-prose only, **E** unreferenced. `python tools/deploy_index.py` regenerates it from the extractor's map and the
-notebooks; `--check` runs inside `tools/check_auth_wiring.py`, which also refuses a code file in D or E - a kit file no
-lesson shows is a file nobody can explain from the course.
+prose only, **E** unreferenced. Its generator and curriculum gates live in the
+separate authoring repository and are not available on `prod_agent`; this index
+describes the inherited kit rather than files required to run this branch.

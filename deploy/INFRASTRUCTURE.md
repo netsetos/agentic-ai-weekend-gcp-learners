@@ -32,9 +32,10 @@ Terraform replacements into the terminal.
 
 ## 1. Update source once, preserving local deployment data
 
-Use the `rag-production-hardening` branch of the public learners repository for
-an anonymous download. The corresponding main-repository branch is
-`claude/rag-production-hardening`.
+Use the `prod_agent` branch of the public learners repository for an anonymous
+download of the deployment kit. It was created from `rag-production-hardening`
+with the course module folders removed. The original main-repository course
+branch is `claude/rag-production-hardening`.
 
 For an existing workstation deployment, this copies the current committed
 deployment source into the existing directory. It does not delete untracked
@@ -45,7 +46,7 @@ intentional local source edits you need.
 ```bash
 export DEMO_ROOT="$HOME/deploy_module_rag"
 RAG_UPDATE_DIR="$(mktemp -d "$HOME/documind-source-update.XXXXXX")" &&
-git clone --depth 1 --single-branch --branch rag-production-hardening \
+git clone --depth 1 --single-branch --branch prod_agent \
   https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git "$RAG_UPDATE_DIR" &&
 mkdir -p "$DEMO_ROOT" &&
 cp -a "$RAG_UPDATE_DIR/deploy/." "$DEMO_ROOT/"
@@ -123,10 +124,11 @@ python commands/infrastructure.py prepare --project "$PROJECT" --region "$REGION
 python commands/infrastructure.py plan --project "$PROJECT" --region "$REGION"
 ```
 
-If learners GitHub Actions are intentionally the deployment authority on a new
+If `prod_agent` GitHub Actions are intentionally the deployment authority on a new
 project, use the learners repository, ID `1367035480`, and
-`refs/heads/rag-production-hardening` as the three explicit values. This is not
-required for a public clone. Existing deployments preserve their current trust;
+`refs/heads/prod_agent` as the three explicit values. This is an explicit opt-in,
+not a requirement for a public clone or a change made by creating the branch.
+Existing deployments preserve their current trust;
 the helper refuses a conflicting selection instead of performing a CI migration.
 
 Keep all your other intended Terraform feature inputs. Existing `.tfvars` and

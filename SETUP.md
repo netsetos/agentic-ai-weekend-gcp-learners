@@ -1,115 +1,113 @@
-# Setup
+# Set up the production agent branch
 
-Two ways to run the notebooks: **Colab** (nothing to install) or **local Jupyter**. Both authenticate to GCP with
-Application Default Credentials; there are no API keys to manage anywhere in the course.
+Use this guide for **`prod_agent`**, which runs the committed code under
+`deploy/`. Start with offline validation, then prepare GCP when you are ready
+to deploy. Python 3.12 matches the repository's CI environment.
 
-## Step 0 - the GCP project, once
-
-This is lesson 1.1, condensed. Do it once, before Module 1.
-
-```bash
-# 1. The project
-gcloud projects create documind-ai-YOUR-ID --name="DocuMind AI Capstone"
-gcloud config set project documind-ai-YOUR-ID
-
-# 2. Billing (required even for free-tier services)
-gcloud billing projects link documind-ai-YOUR-ID \
-  --billing-account=$(gcloud billing accounts list --format="value(name)" --limit=1)
-```
+## 1. Clone and create a Python environment
 
 ```bash
-# Enable the same 40 APIs as deploy/commands/lesson-12.1.sh.
-# Service Usage accepts at most twenty services per call.
-gcloud services enable \
-  run.googleapis.com \
-  compute.googleapis.com \
-  vpcaccess.googleapis.com \
-  pubsub.googleapis.com \
-  artifactregistry.googleapis.com \
-  secretmanager.googleapis.com \
-  firestore.googleapis.com \
-  storage.googleapis.com \
-  aiplatform.googleapis.com \
-  documentai.googleapis.com \
-  vision.googleapis.com \
-  language.googleapis.com \
-  translate.googleapis.com \
-  speech.googleapis.com \
-  texttospeech.googleapis.com \
-  dlp.googleapis.com \
-  iap.googleapis.com \
-  iamcredentials.googleapis.com \
-  cloudbuild.googleapis.com \
-  orgpolicy.googleapis.com
-
-gcloud services enable \
-  cloudtrace.googleapis.com \
-  monitoring.googleapis.com \
-  logging.googleapis.com \
-  billingbudgets.googleapis.com \
-  bigquery.googleapis.com \
-  discoveryengine.googleapis.com \
-  dataplex.googleapis.com \
-  sqladmin.googleapis.com \
-  eventarc.googleapis.com \
-  workflows.googleapis.com \
-  cloudscheduler.googleapis.com \
-  cloudfunctions.googleapis.com \
-  modelarmor.googleapis.com \
-  cloudbilling.googleapis.com \
-  cloudresourcemanager.googleapis.com \
-  serviceusage.googleapis.com \
-  vectorsearch.googleapis.com \
-  spanner.googleapis.com \
-  container.googleapis.com \
-  clouddeploy.googleapis.com
-
-# Wait for propagation (IAM can take up to 60s)
-echo "Waiting 60s for API propagation..."
-sleep 60
-
-# Verify all APIs are enabled
-gcloud services list --enabled --format="table(name)"
-```
-
-```bash
-# 4. Default regions for the course (generation is global; these are for the regional services)
-gcloud config set compute/region us-central1
-gcloud config set run/region us-central1
-```
-
-Set a budget alert before you run anything (lesson 1.1, step 3). The kit's `make preflight` (from `deploy/` in this
-repo) checks all of this read-only.
-
-## Colab
-
-Every notebook starts with the same two cells: the pinned installs, then
-
-```python
-from google.colab import auth
-auth.authenticate_user()
-```
-
-Change `PROJECT_ID = "documind-ai-YOUR-ID"` to your project id and run the rest in order. Notebooks from 2.3 on clone this
-repo (`/content/agentic-ai-weekend-gcp-learners`) the first time they need the kit under `deploy/`.
-
-## Local Jupyter
-
-```bash
-git clone --branch rag-production-hardening --single-branch https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
+git clone --branch prod_agent --single-branch https://github.com/netsetos/agentic-ai-weekend-gcp-learners.git
 cd agentic-ai-weekend-gcp-learners
-python -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-cp .env.example .env                                   # PROJECT_ID, REGION
-gcloud auth application-default login
-jupyter lab
+python -m venv .venv
 ```
 
-Locally the `auth.authenticate_user()` cell is a no-op outside Colab; ADC from `gcloud auth application-default login`
-is what the clients use. The kit is already beside you: the notebooks look for `deploy/evals` above their own folder
-before they clone anything, and this repo has it.
+Activate the environment on macOS/Linux:
 
-## What costs money
+```bash
+source .venv/bin/activate
+```
 
-Every notebook prints what its calls cost, in USD and INR. The expensive lessons say so at the top (Document AI pages,
-tuning jobs, GPU services in Module 11) and the kit's `make off` turns the deployed lane off at the end of a day.
+Or in Windows PowerShell:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Install the offline gate dependencies, matching the CI workflow:
+
+```bash
+python -m pip install pydantic pandas pypdf requests
+```
+
+For a service you run locally, also install its own requirements from
+`deploy/services/<service>/`. The root `requirements.txt` retains course pins
+and notebook tooling; it is not the production stack's combined requirements.
+
+## 2. Run the offline checks
+
+Run from the repository root:
+
+```bash
+python -m compileall -q deploy
+python -m unittest discover -s deploy/commands/tests -v
+python -m unittest discover -s deploy/operators/tests -v
+python -m unittest discover -s deploy/evals/tests -v
+python deploy/extract_documind.py --check
+python deploy/validate.py
+python deploy/evals/run_eval.py
+```
+
+`make -C deploy dryrun` is a shortcut for the extraction check, validator and
+offline evaluation; run the three regression suites above as well.
+
+These checks do not need GCP credentials. Extraction reports a **kit-only
+checkout**, since there are no curriculum source notebooks to compare against.
+The validator skips Terraform, tflint and Docker checks if the tools are
+unavailable. Install Terraform 1.9.8 (the CI version) and Docker for infrastructure
+validation and image builds; provider and image downloads require internet
+access. Review skips and warnings as well as the exit code.
+
+## 3. Prepare GCP for deployment
+
+Use Bash, Cloud Shell or a Cloud Workstation for the deployment commands. You
+will need the Google Cloud CLI, Terraform, Make, the intended GCP project with
+billing enabled, and permission to use its resources.
+
+For an existing project:
+
+```bash
+export PROJECT="your-project-id"
+export REGION="us-central1"
+gcloud config set project "$PROJECT"
+gcloud auth application-default login
+gcloud auth application-default set-quota-project "$PROJECT"
+```
+
+Use your deployment's existing region when resuming it. `PROJECT` is the
+Makefile input; `.env.example` uses `PROJECT_ID`, and the Makefile does not
+automatically load that file.
+
+Install the client used by the roster command:
+
+```bash
+python -m pip install google-cloud-firestore==2.30.0
+```
+
+Enable the deployment APIs through the committed command:
+
+```bash
+make -C deploy apis PROJECT="$PROJECT"
+```
+
+Follow [deploy/INFRASTRUCTURE.md](deploy/INFRASTRUCTURE.md) to select or restore
+the correct Terraform backend, preserve existing CI trust, prepare inputs and
+review a saved plan before applying it. A new project also needs a Terraform
+state bucket; reuse the correct bucket and prefix for an existing deployment.
+Check prerequisites with the intended bucket:
+
+```bash
+make -C deploy preflight PROJECT="$PROJECT" REGION="$REGION" TFSTATE_BUCKET="your-state-bucket"
+```
+
+Then follow [deploy/README.md](deploy/README.md) for service deployment,
+ingestion, live evaluation and smoke checks. The `prod_agent` branch does not
+automatically gain deployment permissions; release automation uses the
+repository/ref configured in Workload Identity Federation.
+
+## Costs and shutdown
+
+Live infrastructure, model calls, document processing and GPU workloads can
+incur charges. Set a project budget and review the deployment guide's shutdown
+commands. `make off` reduces running costs but does not remove every billable
+resource; inspect the guide before choosing a shutdown or teardown operation.

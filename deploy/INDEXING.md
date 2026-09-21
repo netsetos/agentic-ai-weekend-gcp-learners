@@ -275,8 +275,10 @@ API image are unchanged. Existing batch/reconcile jobs using ingest code are upd
   source "$HOME/rag-shell-venv/bin/activate"
   source "$HOME/rag-git-source.sh"
   mkdir -p operator-evidence
-  export SOURCE_BRANCH=claude/rag-production-hardening
-  export RAG_SOURCE_REPO="${RAG_SOURCE_REPO:-$HOME/documind-rag-source}"
+  # Use the prod_agent checkout of netsetos/agentic-ai-weekend-gcp-learners.
+  # Set RAG_SOURCE_REPO to that checkout before running this recovery.
+  export SOURCE_BRANCH=prod_agent
+  : "${RAG_SOURCE_REPO:?Set the prod_agent learners repository checkout}"
   # Preserve the source stamp used by the other deployed services.
   export RAG_SESSION_FILE="$DEMO_ROOT/operator-evidence/document-embedding-source.env"
   rag_refresh_source
