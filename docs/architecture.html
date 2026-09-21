@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firestore Design</title>
+<meta name="description" content="The collections, document ids, fields, indexes and retention policy behind DocuMind's Firestore database.">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="index.html">DocuMind &middot; Data Architecture</a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="architecture.html" aria-current="page">Firestore design</a>
+      <a href="updates.html">Updates</a>
+      <a href="idempotency.html">Idempotency</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h1>How the Firestore database is designed</h1>
+<p class="lede">Firestore stores <em>documents</em> (records) inside <em>collections</em> (folders). Every document
+has an id. Almost every good decision in this system comes from choosing those ids carefully — because in
+Firestore, writing to the same id twice is an update, and writing to a new id is a duplicate.</p>
+
+<h2>The three identities</h2>
+
+<p>Before the collections make sense, one distinction has to be clear. A "document" in the everyday sense — say
+<code>hr_policy_2026.md</code> — is actually three different things, and the database keeps three different
+records for it.</p>
+
+<figure>
+<svg viewBox="0 0 820 250" role="img" aria-label="Diagram showing one source path containing two versions, each version containing many chunks.">
+  <rect x="0" y="0" width="820" height="250" class="svg-bg"/>
+
+  <rect x="20" y="95" width="200" height="66" rx="8" class="svg-accent-fill"/>
+  <text x="120" y="120" class="svg-text" text-anchor="middle" font-weight="600">SOURCE</text>
+  <text x="120" y="139" class="svg-mono" text-anchor="middle">acme/hr_policy_2026.md</text>
+  <text x="120" y="180" class="svg-label" text-anchor="middle">the file path — never changes</text>
+
+  <path d="M225 118 H290" class="svg-arrow" marker-end="url(#b)"/>
+  <path d="M225 140 H290" class="svg-arrow" marker-end="url(#b)"/>
+
+  <rect x="295" y="58" width="190" height="60" rx="8" class="svg-stroke"/>
+  <text x="390" y="80" class="svg-text" text-anchor="middle">VERSION (retired)</text>
+  <text x="390" y="99" class="svg-mono" text-anchor="middle">acme_9f2c…</text>
+
+  <rect x="295" y="140" width="190" height="60" rx="8" class="svg-good-fill"/>
+  <text x="390" y="162" class="svg-text" text-anchor="middle">VERSION (current)</text>
+  <text x="390" y="181" class="svg-mono" text-anchor="middle">acme_4b81…</text>
+
+  <path d="M490 170 H548" class="svg-arrow" marker-end="url(#b)"/>
+
+  <rect x="553" y="98" width="200" height="104" rx="8" class="svg-stroke"/>
+  <text x="653" y="122" class="svg-text" text-anchor="middle">CHUNKS</text>
+  <text x="653" y="143" class="svg-mono" text-anchor="middle">acme:4b81…#0</text>
+  <text x="653" y="161" class="svg-mono" text-anchor="middle">acme:4b81…#1</text>
+  <text x="653" y="179" class="svg-mono" text-anchor="middle">acme:4b81…#2 …</text>
+  <text x="653" y="222" class="svg-label" text-anchor="middle">one row per passage, each with a vector</text>
+
+  <text x="390" y="228" class="svg-label" text-anchor="middle">a version = the sha256 of the bytes</text>
+
+  <defs>
+    <marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" class="svg-label"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>One source has many versions over time; one version has many chunks. Keeping these apart is what lets
+a re-upload retire its predecessor instead of standing beside it.</figcaption>
+</figure>
+
+<div class="table-scroll">
+<table>
+  <thead>
+    <tr><th>Identity</th><th>What it is</th><th>Its id</th><th>Example</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Source</strong></td>
+      <td>The place a file lives. Stays the same across every re-issue.</td>
+      <td><code>tenant~path</code> (Firestore ids cannot contain <code>/</code>, so it becomes <code>~</code>)</td>
+      <td><code>acme~hr_policy_2026.md</code></td>
+    </tr>
+    <tr>
+      <td><strong>Version</strong></td>
+      <td>One specific set of bytes. New bytes = new version.</td>
+      <td><code>doc_key = tenant_sha256</code></td>
+      <td><code>acme_4b81f0…</code></td>
+    </tr>
+    <tr>
+      <td><strong>Chunk</strong></td>
+      <td>One passage of text plus its embedding vector.</td>
+      <td><code>tenant:sha256#index</code></td>
+      <td><code>acme:4b81f0…#7</code></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note warn">
+  <span class="label">A real bug this fixed</span>
+  <p>Chunk ids used to be just <code>sha256#index</code>, with no tenant. Two customers uploading the same public
+  Act wrote to the <em>same</em> Firestore ids, and the second ingest silently overwrote the first customer's rows
+  with its own <code>tenant_id</code>. Adding the tenant prefix to the id made the collision impossible.
+  See the long comment in <code>deploy/services/ingest/contracts.py</code>.</p>
+</div>
+
+<h2>The collections</h2>
+
+<p>Four collections carry the document lifecycle. The rest support retrieval, tenancy and auditing.</p>
+
+<h3>The four that matter</h3>
+
+<div class="grid">
+  <div class="card">
+    <h3><code>sources/{tenant~path}</code></h3>
+    <p><span class="tag">the ledger</span></p>
+    <p>One row per file path. Answers "<strong>which version is live right now?</strong>" It holds
+    <code>doc_key</code>, the storage <code>generation</code>, <code>sha256</code>, how many chunks, how many
+    vectors were reused vs. freshly embedded, the date the document declares itself effective from, and a
+    <code>status</code>.</p>
+    <p>This is what a professional indexer calls a <em>record manager</em>, and it is the single record that makes
+    re-issuing a document possible.</p>
+  </div>
+  <div class="card">
+    <h3><code>documents/{doc_key}</code></h3>
+    <p><span class="tag">the claim</span></p>
+    <p>One row per <em>version</em>. It is written before any work starts, as a lock: "I am processing these
+    bytes." Its <code>status</code> moves through <code>processing → indexed</code>, or to
+    <code>failed</code>, <code>queued</code>, or <code>superseded</code>.</p>
+    <p>Because the id is a hash of the content, a second delivery of the same file hits the same row and is
+    recognised as a repeat.</p>
+  </div>
+  <div class="card">
+    <h3><code>chunks/{tenant:sha#i}</code></h3>
+    <p><span class="tag">the corpus</span></p>
+    <p>The actual searchable data: <code>text</code>, its 768-dimension <code>embedding</code>,
+    <code>source_uri</code>, <code>page_start</code>, <code>locator</code>, <code>chunk_hash</code>, the embedding
+    stamp, and the two flags the whole design turns on: <code>current</code> and <code>staged</code>.</p>
+  </div>
+  <div class="card">
+    <h3><code>ledger/{tenant}</code></h3>
+    <p><span class="tag">the fingerprint</span></p>
+    <p>One row per tenant holding a short hash of all their current <code>doc_key</code>s. It changes whenever
+    anything is indexed, retired or reactivated — and on nothing else. Caches compare against it and know
+    instantly that they are stale.</p>
+  </div>
+</div>
+
+<h3>The supporting cast</h3>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Collection</th><th>Holds</th></tr></thead>
+  <tbody>
+    <tr><td><code>ingest_batch/{doc_key}</code></td><td>Documents over 250 pages, waiting for the long-running batch job.</td></tr>
+    <tr><td><code>graph_nodes/</code>, <code>graph_edges/</code></td><td>The entity graph built over current chunks, for graph-assisted retrieval.</td></tr>
+    <tr><td><code>graph_extractions/</code></td><td>Extraction results cached by <code>chunk_hash</code>, so a re-issue only re-extracts what changed.</td></tr>
+    <tr><td><code>answer_cache/</code></td><td>Semantic answer cache, with its own vector index and TTL.</td></tr>
+    <tr><td><code>tenant_caches/{tenant}</code></td><td>The packed context cache, stamped with the <code>corpus_fingerprint</code> it was built from.</td></tr>
+    <tr><td><code>tenant_settings/{tenant}</code></td><td>Per-tenant policy: <code>data_region</code> (may text leave India?) and <code>retrieval_backend</code>.</td></tr>
+    <tr><td><code>tenants/</code>, <code>members/</code>, <code>api_keys/</code></td><td>The roster and access control.</td></tr>
+    <tr><td><code>dlp_findings/</code>, <code>audit_index/</code>, <code>budget/</code></td><td>PII findings, the audit trail index, and spend tracking.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>The fields that do the work</h2>
+
+<p>On a chunk row, five fields carry the whole update story. Everything else is payload.</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Field</th><th>Plain meaning</th><th>Who writes it</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>current</code></td>
+      <td><code>true</code> = readers may see this row. <code>false</code> = retired; it stays in the database but
+      is invisible to search.</td>
+      <td>the swap, the undo</td>
+    </tr>
+    <tr>
+      <td><code>staged</code></td>
+      <td>"Written but not switched on yet." A brand-new version lands staged and invisible.</td>
+      <td>the writer, cleared by the swap</td>
+    </tr>
+    <tr>
+      <td><code>chunk_hash</code></td>
+      <td>The hash of the passage's own text, with whitespace collapsed. This is the chunk's identity
+      <em>across</em> versions — it is how the system knows "this paragraph did not change, reuse its vector."</td>
+      <td>the chunker</td>
+    </tr>
+    <tr>
+      <td><code>expire_at</code></td>
+      <td>A timestamp. Firestore's TTL policy deletes the row after it. Set only on retired and staged rows.</td>
+      <td>the swap (now + 30 days), the staged write (now + 1 day)</td>
+    </tr>
+    <tr>
+      <td><code>doc_key</code></td>
+      <td>Which version this chunk belongs to. Lets one query separate the new rows from the old ones.</td>
+      <td>the writer</td>
+    </tr>
+    <tr>
+      <td><code>embedding_model</code>,<br><code>embedding_version</code>,<br><code>embedding_task_type</code></td>
+      <td>What the vector was made with. A vector is only reused when all three match today's configuration —
+      otherwise it is re-embedded rather than trusted.</td>
+      <td>the writer</td>
+    </tr>
+    <tr>
+      <td><code>locator</code></td>
+      <td>A human-readable address inside the document (<code>NP-03</code>, <code>p7-1</code>,
+      <code>preamble</code>). Survives an insertion above it, which a page number does not.</td>
+      <td>the chunker</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Chunking by section, not by character count</h2>
+
+<p>This sounds like a detail and is actually the single biggest cost saver.</p>
+
+<p>If you cut a document into fixed 2,000-character windows, inserting one line at the top shifts
+<em>every</em> window. Every chunk hash changes. You re-embed the entire document for a one-line edit. That is
+exactly what happened: a re-issued handbook reused <strong>none</strong> of its 92 windows.</p>
+
+<p>So when a document has <code>## </code> headings, it is cut by section instead — one chunk per clause, with the
+clause code as the locator. Now a one-clause edit changes one chunk hash. The same handbook reused
+<strong>281 of its 283 chunks</strong> and embedded 2.</p>
+
+<div class="note good">
+  <span class="label">Why this belongs in a database page</span>
+  <p>Chunk boundaries decide how many <code>chunk_hash</code> values survive a re-issue, and
+  <code>chunk_hash</code> is what the carry-over query joins on. The chunking rule and the schema are one design,
+  not two. The same rule lives in <code>deploy/shared/documind_corpus.py</code> so the teaching notebooks mint
+  byte-identical chunks to the production worker.</p>
+</div>
+
+<h2>Indexes: what Firestore needs declared up front</h2>
+
+<p>Firestore refuses a query it has no index for. Every index this system needs is declared in Terraform
+(<code>deploy/terraform/firestore_indexes.tf</code>) rather than clicked into existence from an error link, so a
+fresh project works on the first try.</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Index</th><th>Serves</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>chunks</code>: <code>tenant_id</code> + <code>embedding</code> (768-dim, flat)</td>
+      <td>Nearest-neighbour search within one tenant.</td>
+    </tr>
+    <tr>
+      <td><code>chunks</code>: <code>tenant_id</code> + <code>current</code> + <code>embedding</code></td>
+      <td>The same search, pre-filtered to live rows only — retired versions never even enter the candidate set.</td>
+    </tr>
+    <tr>
+      <td><code>chunks</code>: six combinations of <code>current</code> + <code>doc_type</code> + <code>kind</code></td>
+      <td>Filtered search ("only contracts", "only figures") with and without the current filter.</td>
+    </tr>
+    <tr>
+      <td><code>graph_edges</code>, <code>graph_nodes</code>: <code>tenant_id</code> + id field</td>
+      <td>Each hop of the undirected graph walk.</td>
+    </tr>
+    <tr>
+      <td><code>members.email</code> (collection-group)</td>
+      <td>"Which tenants is this person a member of?" across all tenants at once.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>One deliberate omission: the retire query uses only two equality filters
+(<code>tenant_id</code> and <code>source_uri</code>), which Firestore serves from its automatic single-field
+indexes. The hot path of an update needs no composite index at all.</p>
+
+<h2>The one thing allowed to delete</h2>
+
+<p>Nothing in the application code calls <code>delete</code> on a chunk. Not the worker, not the nightly job, not
+an operator command. Deletion is a <em>declared policy</em>:</p>
+
+<pre><code>resource "google_firestore_field" "chunks_expire_at" {
+  collection = "chunks"
+  field      = "expire_at"
+  ttl_config {}
+}</code></pre>
+
+<p>A retired row gets <code>expire_at = now + RETENTION_DAYS</code> (30 by default) and Google's platform removes
+it later. A staged row that nothing ever swapped in gets <code>expire_at = now + 1 day</code> and cleans itself up.
+That one number is both the <strong>audit window</strong> and the <strong>undo window</strong> — how long you can
+prove what the document used to say, and how long you can take a bad update back for free.</p>
+
+<h3>Database-level settings</h3>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Setting</th><th>Value</th><th>Why</th></tr></thead>
+  <tbody>
+    <tr><td>Mode</td><td><code>FIRESTORE_NATIVE</code></td><td>Needed for vector search and TTL policies.</td></tr>
+    <tr><td>Location</td><td>the India region</td><td>Data residency, DPDPA-aligned.</td></tr>
+    <tr><td>Concurrency</td><td><code>OPTIMISTIC</code></td><td>Transactions retry on conflict rather than holding locks — which is what makes the claim transaction cheap.</td></tr>
+    <tr><td>Point-in-time recovery</td><td>enabled</td><td>A safety net beneath the retention window.</td></tr>
+    <tr><td>Delete protection</td><td>enabled</td><td>The database cannot be destroyed by an accidental <code>terraform apply</code>.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="next">
+  <a href="updates.html">
+    <span class="k">Next</span>
+    <span class="t">How an update is handled</span>
+    <span class="d">Now that you know the tables, follow one re-uploaded file through all eight steps.</span>
+  </a>
+  <a href="idempotency.html">
+    <span class="k">Then</span>
+    <span class="t">Why it is idempotent</span>
+    <span class="d">Every duplicate the real world produces, and what absorbs it.</span>
+  </a>
+</div>
+
+<footer class="page">
+  <p>Code: <code>deploy/services/ingest/idempotency.py</code> (collections and states),
+  <code>deploy/services/ingest/indexer.py</code> (chunk rows and vectors),
+  <code>deploy/terraform/firestore.tf</code> and <code>firestore_indexes.tf</code> (database, indexes, TTL).</p>
+</footer>
+
+</main>
+</body>
+</html>

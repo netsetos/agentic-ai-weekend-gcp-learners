@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Idempotency</title>
+<meta name="description" content="Every kind of duplicate a real RAG ingestion pipeline produces, and the exact database mechanism that makes repeating it harmless.">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="index.html">DocuMind &middot; Data Architecture</a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Firestore design</a>
+      <a href="updates.html">Updates</a>
+      <a href="idempotency.html" aria-current="page">Idempotency</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h1>Why it is idempotent</h1>
+<p class="lede"><strong>Idempotent</strong> means: doing it once and doing it five times give the same result.
+Press the lift button five times — the lift still comes once. This page shows every kind of duplicate this system
+actually receives, and the specific thing that absorbs it.</p>
+
+<h2>Why this is not optional</h2>
+
+<p>Pub/Sub, the queue that carries upload notifications, guarantees <strong>at-least-once</strong> delivery. Not
+exactly-once. In practice that means:</p>
+
+<ul>
+  <li>a message can arrive <strong>twice</strong>, sometimes simultaneously on two workers;</li>
+  <li>messages can arrive <strong>out of order</strong>, so an old version's event can land after a new one's;</li>
+  <li>a worker that crashes after doing half the work will see the message <strong>again</strong>.</li>
+</ul>
+
+<p>On top of that, humans create duplicates: they upload the same file twice, they re-upload a file that hasn't
+actually changed, and a second pipeline (the teaching notebooks) writes the same chunks through a different route.
+A pipeline that is not idempotent turns each of these into a corrupted index.</p>
+
+<h2>The foundation: the key is made from the content</h2>
+
+<p>This one decision carries most of the weight.</p>
+
+<pre><code>doc_key = f"{tenant_id}_{sha256_of(bytes)}"</code></pre>
+
+<p>The obvious alternative is to deduplicate on the Pub/Sub message id. It does not work. A message id is stable
+across a <em>redelivery</em> — so it would catch a retry — but the same PDF uploaded twice is two different
+messages with two different ids. That is the duplicate users actually create, and the message id misses it
+entirely.</p>
+
+<p>A content hash catches both. And because Firestore treats a write to an existing id as an update rather than an
+insert, landing on the same id is exactly what you want:</p>
+
+<div class="note good">
+  <span class="label">The core property</span>
+  <p>Same bytes &rarr; same <code>doc_key</code> &rarr; same Firestore document &rarr; same chunk ids
+  (<code>tenant:sha256#i</code>). Re-running the pipeline <strong>upserts the same rows</strong> instead of adding
+  a second copy of every chunk beside the first.</p>
+</div>
+
+<h2>The six duplicates, and what absorbs each</h2>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>#</th><th>What happens</th><th>What absorbs it</th><th>Result</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>The same message is delivered twice, one after the other</td>
+      <td>The claim row already exists with status <code>indexed</code></td>
+      <td>Returns 200 — an ack, not an error. Logged <code>ingest_duplicate</code>.</td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>The same message hits <strong>two workers at the same instant</strong></td>
+      <td>The claim is a Firestore <strong>transaction</strong>: read and write are one atomic step</td>
+      <td>Exactly one worker wins. The loser acks.</td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>An old version's event arrives <em>after</em> a newer one was indexed</td>
+      <td>The generation guard, against <code>sources/{…}.generation</code></td>
+      <td><code>ingest_stale_event</code>. Nothing downloaded, ledger untouched.</td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>A worker crashes halfway through</td>
+      <td><code>release()</code> writes status <code>failed</code>; staged rows expire by TTL</td>
+      <td>The next delivery may claim it again and starts clean.</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>A user re-uploads a file that <strong>hasn't changed</strong></td>
+      <td>Same bytes &rarr; same <code>doc_key</code> &rarr; the claim is refused</td>
+      <td>Acked as a duplicate. Zero embedding cost.</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>A second pipeline (the notebooks) already wrote these exact chunks</td>
+      <td><code>current_chunks()</code> counts live rows for this <code>doc_key</code> before parsing</td>
+      <td><code>ingest_already_current</code>: the claim is recorded, the ledger learns the generation, nothing is
+      parsed or embedded.</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h2>Case 2 in detail: why the transaction is load-bearing</h2>
+
+<p>It is tempting to write the claim as "read the row; if it's empty, write it." That is a race with a window of a
+few milliseconds — and Pub/Sub delivers duplicates <em>concurrently</em>, so it is a window that gets hit in
+production.</p>
+
+<figure>
+<svg viewBox="0 0 820 260" role="img" aria-label="Diagram comparing a read-then-write race, where both workers proceed, with a transaction, where only one wins.">
+  <rect x="0" y="0" width="820" height="260" class="svg-bg"/>
+
+  <text x="20" y="26" class="svg-text" font-weight="600">Without a transaction</text>
+  <rect x="20" y="38" width="160" height="34" rx="6" class="svg-stroke"/>
+  <text x="100" y="60" class="svg-label" text-anchor="middle">worker A reads: absent</text>
+  <rect x="20" y="80" width="160" height="34" rx="6" class="svg-stroke"/>
+  <text x="100" y="102" class="svg-label" text-anchor="middle">worker B reads: absent</text>
+  <rect x="200" y="38" width="150" height="34" rx="6" class="svg-accent-fill"/>
+  <text x="275" y="60" class="svg-label" text-anchor="middle">A writes &amp; proceeds</text>
+  <rect x="200" y="80" width="150" height="34" rx="6" class="svg-accent-fill"/>
+  <text x="275" y="102" class="svg-label" text-anchor="middle">B writes &amp; proceeds</text>
+  <path d="M185 55 H196" class="svg-arrow" marker-end="url(#d)"/>
+  <path d="M185 97 H196" class="svg-arrow" marker-end="url(#d)"/>
+  <text x="275" y="136" class="svg-label" text-anchor="middle">the document is ingested twice</text>
+
+  <line x1="20" y1="158" x2="800" y2="158" class="svg-stroke"/>
+
+  <text x="20" y="186" class="svg-text" font-weight="600">With a transaction</text>
+  <rect x="20" y="198" width="180" height="34" rx="6" class="svg-stroke"/>
+  <text x="110" y="220" class="svg-label" text-anchor="middle">A: read+write, atomic</text>
+  <rect x="220" y="198" width="160" height="34" rx="6" class="svg-good-fill"/>
+  <text x="300" y="220" class="svg-label" text-anchor="middle">A wins, proceeds</text>
+  <path d="M205 215 H216" class="svg-arrow" marker-end="url(#d)"/>
+
+  <rect x="420" y="198" width="180" height="34" rx="6" class="svg-stroke"/>
+  <text x="510" y="220" class="svg-label" text-anchor="middle">B: retried, sees A's write</text>
+  <rect x="620" y="198" width="160" height="34" rx="6" class="svg-panel" stroke-width="1"/>
+  <text x="700" y="220" class="svg-label" text-anchor="middle">B acks as duplicate</text>
+  <path d="M605 215 H616" class="svg-arrow" marker-end="url(#d)"/>
+
+  <defs>
+    <marker id="d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" class="svg-label"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>Firestore runs in optimistic concurrency mode: the losing transaction detects the conflict and
+retries, and on retry it reads the winner's row and returns <code>False</code>.</figcaption>
+</figure>
+
+<h2>Case 4 in detail: giving the claim back</h2>
+
+<p>A lock you can take but never release is worse than no lock at all. If a worker crashes between the claim and
+the finish, the row is stuck at <code>processing</code> forever — and every redelivery sees "already being
+handled" and does nothing. The document is then <strong>permanently missing, with nothing alerting</strong>,
+because from Pub/Sub's point of view every delivery was acked successfully.</p>
+
+<p>So a failure writes status <code>failed</code> with the error text on the row, and the claim explicitly allows
+a <code>failed</code> row to be retaken:</p>
+
+<pre><code>retakes = ("failed", "superseded") if retake else ("failed",)
+if snap.exists and snap.get("status") not in retakes:
+    return False</code></pre>
+
+<div class="note warn">
+  <span class="label">A real bug this fixed</span>
+  <p>Without <code>failed</code> in that tuple, "give the claim back" gave nothing back. On the first live load,
+  every retry of a failed document was acked as a duplicate and the document stayed failed forever.</p>
+</div>
+
+<h2>The subtler kind: idempotent <em>state</em>, not just idempotent writes</h2>
+
+<p>Not writing a row twice is the easy half. The harder half is making sure that repeating an operation leaves the
+database in the same <em>state</em>. Three places where that took real care:</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>Ordering inside the swap</h3>
+    <p>The swap flips new rows on <em>before</em> flipping old rows off. Run it again and it is a no-op — the new
+    rows are already current and the old ones already have <code>current: false</code>, which the loop skips
+    explicitly. Repeating the swap cannot produce a moment with zero visible versions.</p>
+  </div>
+  <div class="card">
+    <h3>Counting before the undo</h3>
+    <p>The undo is only idempotent if the rows it expects still exist. So it counts surviving rows against the
+    claim's recorded chunk count, and <code>retired_at</code> against the retention window. Refusing loudly
+    (<code>reactivate_incomplete</code>, both numbers on the line) and changing nothing is the idempotent
+    outcome — a partial flip is not.</p>
+  </div>
+  <div class="card">
+    <h3>The batch lane's second take</h3>
+    <p>The long-document job takes its claim with the same transaction pattern: <code>queued → processing</code>,
+    atomically. Two runs of the job can never index one document twice, and a document the job failed stays
+    <code>failed</code> rather than being retried into a loop.</p>
+  </div>
+</div>
+
+<h2>Where idempotency deliberately stops</h2>
+
+<p>Two things are intentionally <strong>not</strong> made repeatable, and knowing why is part of understanding the
+design.</p>
+
+<ul>
+  <li><strong>A withdrawn source.</strong> When a person runs <code>make retire</code>, the tombstone holds
+  against redelivery, against the nightly walk, and against the same bytes being uploaded again. "Repeat the
+  upload and it comes back" would be idempotent — and wrong. A takedown is a decision, and only a person reverses
+  it with <code>make restore</code>.</li>
+  <li><strong>Firestore and the vector index are not one transaction.</strong> They cannot be; they are separate
+  services. The design absorbs this by ordering the writes so the visible state is never wrong (new datapoints go
+  up after the swap; on an undo the ids go back <em>before</em> the newer version is removed), and by having the
+  nightly reconcile measure and report the drift rather than pretending it is impossible.</li>
+</ul>
+
+<h2>How it is proved, not asserted</h2>
+
+<p>Idempotency claims rot quietly. These are held by gates that run on every change:</p>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Gate</th><th>What it holds</th></tr></thead>
+  <tbody>
+    <tr><td>The lifecycle check</td><td>The tombstone is never re-ingested or reactivated; the verified undo refuses on a shortfall and on a closed window and flips nothing; the batch claim is taken atomically — all against a fake Firestore.</td></tr>
+    <tr><td>The wiring check</td><td>The chunker measured on both revisions of the handbook (281 of 283 reused), the carry-over plan, the newest-version-per-source guard, the swap, the fingerprint, the TTL field.</td></tr>
+    <tr><td>The offline evaluation</td><td>A question whose answer must come from the current version, and a figure only a retired version holds that must <em>not</em> appear.</td></tr>
+    <tr><td><code>make smoke-reindex</code></td><td>The whole lifecycle end to end on a three-chunk fixture: upload v2 and the answer moves; upload v1 again and the answer comes back.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<h2>The eight questions to ask of any RAG index</h2>
+
+<p>If you are building something similar, this is the checklist — each one is a question a reviewer can ask,
+whatever the database.</p>
+
+<ol>
+  <li>Can you name a source, a version and a chunk, and does the chunk identity survive an insertion above it?</li>
+  <li>Is change detected by <strong>hash and generation</strong>, never by timestamp, with a late redelivery ignored?</li>
+  <li>Does an edit of one paragraph embed one paragraph, and is the embedding model stamped on every row?</li>
+  <li>Can a reader ever retrieve two versions of one source? If the write is not a swap, does the reader guard?</li>
+  <li>Is anything deleted by a person or a cron job, or only by a declared retention policy?</li>
+  <li>Does a scheduled reconcile run, emit a drift number, and alert when it stays non-zero?</li>
+  <li>Does a document change go through the same gates as a code change?</li>
+  <li>Are lifecycle events metrics with alerts, and is the cache keyed to the current versions?</li>
+</ol>
+
+<div class="next">
+  <a href="architecture.html">
+    <span class="k">Back to</span>
+    <span class="t">The Firestore design</span>
+    <span class="d">Collections, ids, fields, indexes and the TTL policy.</span>
+  </a>
+  <a href="updates.html">
+    <span class="k">Back to</span>
+    <span class="t">How an update is handled</span>
+    <span class="d">The eight steps, the undo and the nightly reconcile.</span>
+  </a>
+</div>
+
+<footer class="page">
+  <p>Code: <code>deploy/services/ingest/idempotency.py</code> (claim, take_batch, stale_generation, swap, undo),
+  <code>contracts.py</code> (why the key is content-derived),
+  <code>main.py</code> (the duplicate branches). Prose source: <code>deploy/INDEXING.md</code>.</p>
+</footer>
+
+</main>
+</body>
+</html>

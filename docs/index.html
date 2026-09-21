@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DocuMind Data Architecture</title>
+<meta name="description" content="How DocuMind's Firestore database is designed, how a document update is handled, and why every step can be safely repeated.">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="index.html">DocuMind &middot; Data Architecture</a>
+    <nav>
+      <a href="index.html" aria-current="page">Overview</a>
+      <a href="architecture.html">Firestore design</a>
+      <a href="updates.html">Updates</a>
+      <a href="idempotency.html">Idempotency</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h1>How DocuMind stores and updates documents</h1>
+<p class="lede">DocuMind is a RAG system. People upload documents; the system cuts them into chunks, turns each
+chunk into a vector, and stores everything in Firestore so questions can be answered with citations. These pages
+explain the database design and — the hard part — what happens when a document <em>changes</em>.</p>
+
+<div class="note">
+  <span class="label">Written in plain language</span>
+  <p>No prior knowledge of Firestore is assumed. Every claim on these pages points at the file in this repository
+  that implements it, so you can read the code straight after the explanation.</p>
+</div>
+
+<h2>The problem in one paragraph</h2>
+
+<p>Uploading a document for the <strong>first</strong> time is easy. The trouble starts on the second upload.
+The same HR policy gets re-issued with one clause changed. A cloud message gets delivered twice. Two workers pick
+up the same file at the same moment. Someone uploads the wrong version and wants it undone. A naive system answers
+questions from <em>two</em> versions of the same policy at once, re-pays for embedding 283 chunks when only 2
+changed, or loses the document entirely when a worker crashes halfway.</p>
+
+<p>DocuMind's answer is a specific database design. Six ideas carry the whole thing:</p>
+
+<div class="grid">
+  <div class="card">
+    <h3>1. Three identities</h3>
+    <p>A <strong>source</strong> (the file path), a <strong>version</strong> (the hash of its bytes), and a
+    <strong>chunk</strong> (the hash of its text). Each gets its own record. Most bugs come from confusing them.</p>
+  </div>
+  <div class="card">
+    <h3>2. Keys made from content</h3>
+    <p>The id of a version is a hash of the bytes themselves. Upload the same file twice and you land on the same
+    record — so the second upload can be recognised as a repeat instead of becoming a duplicate.</p>
+  </div>
+  <div class="card">
+    <h3>3. Nothing is overwritten</h3>
+    <p>A new version is written <em>beside</em> the old one. The old rows are flagged <code>current = false</code>,
+    never deleted. That makes the update reversible for free.</p>
+  </div>
+  <div class="card">
+    <h3>4. Visibility is a swap</h3>
+    <p>New rows land invisible. One pass flips them on and flips the old ones off. A reader never sees two
+    versions of a document at the same time.</p>
+  </div>
+  <div class="card">
+    <h3>5. Only a policy deletes</h3>
+    <p>No person and no cron job deletes a row. A retired row is stamped with an expiry date and Firestore's own
+    TTL policy removes it after the retention window (30 days by default).</p>
+  </div>
+  <div class="card">
+    <h3>6. Every step can be repeated</h3>
+    <p>Cloud messaging delivers "at least once", which really means "sometimes twice". Every step here is written
+    so that running it again changes nothing. That is <a href="idempotency.html">idempotency</a>.</p>
+  </div>
+</div>
+
+<h2>The shape of the system</h2>
+
+<figure>
+<svg viewBox="0 0 820 300" role="img" aria-label="Diagram: a file uploaded to Cloud Storage publishes an event to Pub/Sub, which pushes to the ingest worker, which writes to four Firestore collections that the RAG API reads.">
+  <rect x="0" y="0" width="820" height="300" class="svg-bg"/>
+
+  <rect x="10" y="60" width="130" height="62" rx="8" class="svg-stroke"/>
+  <text x="75" y="85" class="svg-text" text-anchor="middle">Cloud Storage</text>
+  <text x="75" y="103" class="svg-label" text-anchor="middle">the uploaded file</text>
+
+  <path d="M145 91 H190" class="svg-arrow" marker-end="url(#a)"/>
+
+  <rect x="195" y="60" width="130" height="62" rx="8" class="svg-stroke"/>
+  <text x="260" y="85" class="svg-text" text-anchor="middle">Pub/Sub</text>
+  <text x="260" y="103" class="svg-label" text-anchor="middle">"object.finalized"</text>
+
+  <path d="M330 91 H375" class="svg-arrow" marker-end="url(#a)"/>
+
+  <rect x="380" y="52" width="150" height="78" rx="8" class="svg-accent-fill"/>
+  <text x="455" y="80" class="svg-text" text-anchor="middle" font-weight="600">ingest worker</text>
+  <text x="455" y="98" class="svg-label" text-anchor="middle">guard, claim, chunk,</text>
+  <text x="455" y="113" class="svg-label" text-anchor="middle">embed, stage, swap</text>
+
+  <path d="M455 135 V165" class="svg-arrow" marker-end="url(#a)"/>
+
+  <rect x="150" y="170" width="610" height="110" rx="8" class="svg-panel" stroke-width="1"/>
+  <text x="170" y="192" class="svg-label">Firestore</text>
+
+  <rect x="170" y="200" width="130" height="62" rx="6" class="svg-stroke"/>
+  <text x="235" y="222" class="svg-mono" text-anchor="middle">sources/</text>
+  <text x="235" y="240" class="svg-label" text-anchor="middle">which version</text>
+  <text x="235" y="253" class="svg-label" text-anchor="middle">is live</text>
+
+  <rect x="312" y="200" width="130" height="62" rx="6" class="svg-stroke"/>
+  <text x="377" y="222" class="svg-mono" text-anchor="middle">documents/</text>
+  <text x="377" y="240" class="svg-label" text-anchor="middle">one claim per</text>
+  <text x="377" y="253" class="svg-label" text-anchor="middle">version</text>
+
+  <rect x="454" y="200" width="130" height="62" rx="6" class="svg-stroke"/>
+  <text x="519" y="222" class="svg-mono" text-anchor="middle">chunks/</text>
+  <text x="519" y="240" class="svg-label" text-anchor="middle">the text and</text>
+  <text x="519" y="253" class="svg-label" text-anchor="middle">its vector</text>
+
+  <rect x="596" y="200" width="130" height="62" rx="6" class="svg-stroke"/>
+  <text x="661" y="222" class="svg-mono" text-anchor="middle">ledger/</text>
+  <text x="661" y="240" class="svg-label" text-anchor="middle">corpus</text>
+  <text x="661" y="253" class="svg-label" text-anchor="middle">fingerprint</text>
+
+  <rect x="620" y="52" width="140" height="78" rx="8" class="svg-stroke"/>
+  <text x="690" y="80" class="svg-text" text-anchor="middle">RAG API</text>
+  <text x="690" y="98" class="svg-label" text-anchor="middle">reads only rows</text>
+  <text x="690" y="113" class="svg-label" text-anchor="middle">where current=true</text>
+  <path d="M690 170 V135" class="svg-arrow" marker-end="url(#a)"/>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" class="svg-label"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>The write path is one worker. The read path never touches the worker — it reads the same collections
+and trusts the <code>current</code> flag. Code: <code>deploy/services/ingest/</code> writes,
+<code>deploy/services/rag-api/retriever.py</code> reads.</figcaption>
+</figure>
+
+<h2>Where to go next</h2>
+
+<div class="next">
+  <a href="architecture.html">
+    <span class="k">Page 1</span>
+    <span class="t">How the Firestore database is designed</span>
+    <span class="d">The collections, what each document id means, the fields that matter, the indexes and the
+    one TTL policy that is allowed to delete.</span>
+  </a>
+  <a href="updates.html">
+    <span class="k">Page 2</span>
+    <span class="t">How an update is handled</span>
+    <span class="d">The eight steps from "someone re-uploaded the file" to "the new version is live" — plus
+    the undo, the nightly reconcile and the operator commands.</span>
+  </a>
+  <a href="idempotency.html">
+    <span class="k">Page 3</span>
+    <span class="t">Why it is idempotent</span>
+    <span class="d">Every duplicate a real system produces, and the exact mechanism that makes repeating it
+    harmless.</span>
+  </a>
+</div>
+
+<footer class="page">
+  <p>Source of truth for everything on these pages: <code>deploy/INDEXING.md</code>,
+  <code>deploy/services/ingest/</code> and <code>deploy/terraform/firestore*.tf</code> in this repository.</p>
+</footer>
+
+</main>
+</body>
+</html>

@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handling Updates</title>
+<meta name="description" content="What happens, step by step, when a document is re-uploaded: the guard, the claim, the carry-over, the staged write, the swap, the undo.">
+<link rel="stylesheet" href="assets/docs.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="wrap">
+    <a class="brand" href="index.html">DocuMind &middot; Data Architecture</a>
+    <nav>
+      <a href="index.html">Overview</a>
+      <a href="architecture.html">Firestore design</a>
+      <a href="updates.html" aria-current="page">Updates</a>
+      <a href="idempotency.html">Idempotency</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+<h1>How an update is handled</h1>
+<p class="lede">Someone re-uploads <code>acme/hr_policy_2026.md</code> with one clause changed. Same file name,
+new bytes. Here is everything that happens — and, at each step, which part of the database design makes it
+possible.</p>
+
+<div class="note">
+  <span class="label">The rule the whole path follows</span>
+  <p>An update should <strong>cost what changed</strong>, be <strong>invisible until it is whole</strong>, be
+  <strong>reversible for free</strong>, and <strong>leave a trail a person can read</strong>.</p>
+</div>
+
+<h2>The eight steps</h2>
+
+<ol class="steps">
+
+<li>
+<h3>Guard — is this event even current?</h3>
+<p>Cloud Storage numbers every version of an object with a <strong>generation</strong>. The message carries one;
+the <code>sources/</code> ledger remembers the one it indexed. If the incoming generation is <em>older</em> than
+the ledger's, this is a late redelivery of an old version — acting on it would make yesterday's policy live again.
+It is logged as <code>ingest_stale_event</code> and acked. Nothing is downloaded.</p>
+<p>Otherwise the bytes are fetched <strong>by that exact generation</strong>, never "whatever the file holds now".
+An event and its bytes are one version.</p>
+<p><span class="tag">structure used</span> the <code>generation</code> field on the ledger row — a single read
+decides it.</p>
+</li>
+
+<li>
+<h3>Claim — may I be the one to process this?</h3>
+<p>The worker computes <code>sha256</code> of the bytes, which gives it <code>doc_key = tenant_sha256</code>, and
+tries to write <code>documents/{doc_key}</code> <strong>inside a transaction</strong>:</p>
+<pre><code>@firestore.transactional
+def _claim(tx):
+    snap = ref.get(transaction=tx)
+    if snap.exists and snap.get("status") not in retakes:
+        return False              # someone already has it
+    tx.set(ref, {"status": "processing", ...})
+    return True</code></pre>
+<p>The transaction is the whole point. A read-then-write without one is a race with a window of milliseconds —
+and Pub/Sub delivers duplicates <em>concurrently</em>, so it is a window that gets hit. Two workers both read
+"absent", both write, and the document is ingested twice.</p>
+<p>A refused claim is not a failure. Depending on the existing status it means: already done (ack as duplicate),
+waiting for the batch lane (ack as queued), or <em>this is an undo</em> (jump to step 7).</p>
+<p><span class="tag">structure used</span> a content-derived document id, so the same bytes always contend for
+the same row.</p>
+</li>
+
+<li>
+<h3>Parse and chunk</h3>
+<p>A PDF's pages are counted by <code>pypdf</code> <em>before</em> any OCR is paid for. Over 250 pages it is handed
+to the batch lane — <code>ingest_batch/{doc_key}</code> written, the claim set to <code>queued</code>, and a
+Cloud Run job with no request deadline picks it up. Everything else is parsed inline.</p>
+<p>Text is cut <strong>by section</strong> when it has <code>## </code> headings, otherwise into 2,000-character
+windows with 200 characters of overlap, cut page by page so a window never crosses a page break. Every chunk gets
+its <code>chunk_hash</code> and a <code>locator</code>. One PII scan runs per document.</p>
+</li>
+
+<li>
+<h3>Carry-over — pay only for what changed</h3>
+<p>Before embedding anything, the worker reads the previous version's <em>current</em> rows for this source and
+builds a lookup of <code>chunk_hash → vector</code>. Then for each new chunk: if its hash is in that lookup, reuse
+the vector for free. Only the misses go to the embedding API.</p>
+<p>A vector is reused <strong>only</strong> when the model, the version, the task type
+(<code>RETRIEVAL_DOCUMENT</code>) and the vector's 768 dimensions all match today's configuration. An old or
+unstamped vector is re-embedded rather than trusted.</p>
+<figure>
+<svg viewBox="0 0 820 170" role="img" aria-label="Diagram: 283 new chunks matched against the previous version's hashes; 281 reuse their vectors, 2 are embedded.">
+  <rect x="0" y="0" width="820" height="170" class="svg-bg"/>
+  <rect x="20" y="30" width="200" height="100" rx="8" class="svg-stroke"/>
+  <text x="120" y="56" class="svg-text" text-anchor="middle">new version</text>
+  <text x="120" y="80" class="svg-text" text-anchor="middle" font-weight="600">283 chunks</text>
+  <text x="120" y="102" class="svg-label" text-anchor="middle">each with a chunk_hash</text>
+
+  <path d="M228 80 H300" class="svg-arrow" marker-end="url(#c)"/>
+  <text x="264" y="70" class="svg-label" text-anchor="middle">match by hash</text>
+
+  <rect x="305" y="30" width="200" height="100" rx="8" class="svg-panel" stroke-width="1"/>
+  <text x="405" y="56" class="svg-text" text-anchor="middle">previous current rows</text>
+  <text x="405" y="80" class="svg-label" text-anchor="middle">chunk_hash &rarr; vector</text>
+  <text x="405" y="102" class="svg-label" text-anchor="middle">(+ embedding stamp check)</text>
+
+  <path d="M513 62 H585" class="svg-arrow" marker-end="url(#c)"/>
+  <path d="M513 104 H585" class="svg-arrow" marker-end="url(#c)"/>
+
+  <rect x="590" y="34" width="210" height="46" rx="8" class="svg-good-fill"/>
+  <text x="695" y="62" class="svg-text" text-anchor="middle" font-weight="600">281 reused &middot; free</text>
+
+  <rect x="590" y="88" width="210" height="46" rx="8" class="svg-accent-fill"/>
+  <text x="695" y="116" class="svg-text" text-anchor="middle" font-weight="600">2 embedded &middot; paid for</text>
+
+  <defs>
+    <marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 z" fill="currentColor" class="svg-label"/>
+    </marker>
+  </defs>
+</svg>
+<figcaption>Measured on the compliance handbook after a one-clause edit. Both counts are written onto the ledger
+row and onto the <code>ingest_ok</code> log line, so the cost of every update is a number you can read back.</figcaption>
+</figure>
+</li>
+
+<li>
+<h3>Stage — write it, but keep it invisible</h3>
+<p>The new chunk rows are written with <code>current = false</code>, <code>staged = true</code> and an
+<code>expire_at</code> one day out. No reader can see them. If the worker crashes right here, the TTL policy
+cleans up the half-written version by itself and the next delivery starts fresh.</p>
+<p><span class="tag">structure used</span> the <code>current</code> flag as a visibility switch, and
+<code>expire_at</code> as an automatic janitor.</p>
+</li>
+
+<li>
+<h3>Swap — flip the new on, flip the old off</h3>
+<p>One pass, in a strict order, in batches of 400 writes:</p>
+<ol>
+  <li><strong>New rows first:</strong> <code>current = true</code>, and the stage marks cleared. A reader between
+  the two halves finds the new version — never no version.</li>
+  <li><strong>Then the old rows:</strong> <code>current = false</code>, plus <code>superseded_by</code>,
+  <code>superseded_at</code>, <code>expire_at = now + 30 days</code>, and <code>effective_to</code> if the new
+  version declares a date.</li>
+</ol>
+<p>A document up to ~250 chunks flips in a single commit, so the change is atomic. A longer one takes two commits
+— and the reader's own guard covers that window: the retriever drops retired rows and then keeps only the
+<strong>newest version per source</strong>, so even mid-swap it cannot return two versions of one policy.</p>
+<p>After the swap, the vector index gets the new datapoints and loses the retired ids, and (where configured) the
+managed mirror stores are updated.</p>
+<div class="note good">
+  <span class="label">Note what is not here</span>
+  <p>No row is ever overwritten in place, and no row is deleted. A re-issue is <em>new rows beside flagged ones</em>.
+  That is what makes the next step possible.</p>
+</div>
+</li>
+
+<li>
+<h3>The undo — re-uploading the old bytes costs nothing</h3>
+<p>The update was wrong. Upload the previous file again. Its <code>doc_key</code> is the hash of those bytes, so
+the claim lands on a row whose status is <code>superseded</code> — the system recognises this as an undo rather
+than a new document.</p>
+<p>Its chunks are <em>still in the database</em>, just flagged. So the undo is: flip the flags back, put the ids
+back into the vector index, then retire the newer version in turn. <strong>Nothing is re-parsed, nothing is
+re-embedded.</strong></p>
+<p>But it counts before it flips. Two checks:</p>
+<ul>
+  <li>Are all the rows still here? The surviving rows are counted against the chunk count recorded on the claim.</li>
+  <li>Is the window still open? <code>retired_at</code> is compared against the 30-day retention.</li>
+</ul>
+<p>A shortfall or a closed window logs <code>reactivate_incomplete</code> <em>with both numbers</em>, changes
+nothing, and the worker ingests the bytes as a fresh version instead. The carry-over still reuses every vector the
+newer version happens to hold.</p>
+<div class="note warn">
+  <span class="label">The bug this check exists for</span>
+  <p>The first version of the undo flipped whatever rows remained and retired the newer version on the strength of
+  it. After the retention window the TTL policy had already taken the rows — zero were flipped, the newer version
+  was retired anyway, and the source was left with <strong>no current version at all</strong>.</p>
+</div>
+<p>One thing the undo will not do: bring back a source a person deliberately withdrew. That is a
+<strong>tombstone</strong> (<code>status: withdrawn</code>), and only <code>make restore</code> lifts it — not a
+redelivery, not the nightly job, not the same bytes uploaded again.</p>
+</li>
+
+<li>
+<h3>Record — leave a readable trail</h3>
+<p>Three writes close the update:</p>
+<ul>
+  <li><code>documents/{doc_key}</code> → <code>indexed</code>, with chunks, reused, embedded, generation.</li>
+  <li><code>sources/{tenant~name}</code> → the ledger row: the new <code>doc_key</code>, generation, sha256, the
+  counts, the effective date, the embedding stamp.</li>
+  <li><code>ledger/{tenant}</code> → a fresh corpus fingerprint (the hash of all current doc_keys).</li>
+</ul>
+<p>Then one structured log line, <code>ingest_ok</code>, carrying all of it — which becomes a metric, which has an
+alert on it.</p>
+</li>
+
+</ol>
+
+<h2>Why the fingerprint matters</h2>
+
+<p>Caches are the classic way a correct index still returns a stale answer. Here, the answer cache and the context
+cache each record the <code>corpus_fingerprint</code> they were built from. Every change to what is current
+recomputes that fingerprint. The API compares the two in a single read; when they differ it logs
+<code>cache_stale</code> and runs uncached until the corpus is re-packed.</p>
+
+<p>The cache does not need to be told a document changed. It notices.</p>
+
+<h2>The states a document moves through</h2>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Where</th><th>Status</th><th>Means</th><th>Leaves by</th></tr></thead>
+  <tbody>
+    <tr><td><code>sources/</code></td><td><code>indexed</code></td><td>the current version is live</td><td>a re-issue, <code>make retire</code>, or the file leaving the bucket</td></tr>
+    <tr><td><code>sources/</code></td><td><code>retired</code></td><td>the file left the bucket; rows flagged and expiring</td><td>the file coming back — the next nightly walk re-ingests it</td></tr>
+    <tr><td><code>sources/</code></td><td><code>withdrawn</code></td><td>a person took it down on purpose; the file is kept</td><td><code>make restore</code> only</td></tr>
+    <tr><td><code>documents/</code></td><td><code>processing</code></td><td>a worker holds this version</td><td>finish, release, or the batch hand-off</td></tr>
+    <tr><td><code>documents/</code></td><td><code>queued</code></td><td>over 250 pages; waiting for the batch job</td><td>the batch job taking the claim</td></tr>
+    <tr><td><code>documents/</code></td><td><code>indexed</code></td><td>this version is current</td><td>the swap, when a newer version arrives</td></tr>
+    <tr><td><code>documents/</code></td><td><code>superseded</code></td><td>retired; the undo window runs from <code>retired_at</code></td><td>a successful undo, or a retaken claim after a refused one</td></tr>
+    <tr><td><code>documents/</code></td><td><code>failed</code></td><td>the error is on the row, readable</td><td>the next delivery's claim</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p><strong>Deleting the file and <code>make retire</code> are deliberately different states.</strong> The first is
+storage absence, which the nightly walk repairs the moment the file is back. The second is a decision, which
+nothing repairs but a person.</p>
+
+<h2>The nightly reconcile</h2>
+
+<p>Events get lost. A push subscription can fail its retries; a notification can never fire. So the event path is
+the fast path, not the only path: a scheduled job walks the bucket against the ledger every night at 23:30 IST and
+plans an action per file — <code>ok</code>, <code>reingest</code>, <code>retire</code>, <code>backfill</code>,
+<code>check_bytes</code>, or leave-alone for withdrawn and queued documents.</p>
+
+<p>It ends with one number: <strong>drift</strong>, how far the ledger stood from the bucket when it started. An
+alert fires if drift stays above zero for two nights. One night's drift is a lost event; two nights' drift is a
+lane nobody is reconciling.</p>
+
+<p>Crucially, reconcile has <em>no second ingestion path</em>. To re-index something it rewrites the object onto
+itself, which fires a normal event and runs the exact same eight steps. There is one code path for updates, so
+there is one code path to get right.</p>
+
+<h2>What an operator actually types</h2>
+
+<div class="table-scroll">
+<table>
+  <thead><tr><th>Situation</th><th>Command</th><th>What you read back</th></tr></thead>
+  <tbody>
+    <tr><td>One document changed</td><td><code>make reindex FILE=&lt;new&gt; NAME=&lt;same name&gt; TENANT=&lt;t&gt;</code></td><td><code>ingest_ok</code> with reused / embedded / retired counts</td></tr>
+    <tr><td>Only metadata changed</td><td>nothing</td><td>the night's walk records it as a <em>touch</em></td></tr>
+    <tr><td>A late redelivery of an old version</td><td>nothing</td><td><code>ingest_stale_event</code>; the ledger untouched</td></tr>
+    <tr><td>The change was wrong</td><td><code>make reindex FILE=&lt;old&gt; NAME=&lt;same name&gt;</code></td><td><code>ingest_reactivated</code> inside the window; a fresh version after it</td></tr>
+    <tr><td>Take a document down on purpose</td><td><code>make retire SOURCE=</code></td><td>the row <code>withdrawn</code>, the file kept, rows expiring</td></tr>
+    <tr><td>Bring it back</td><td><code>make restore SOURCE=</code></td><td><code>reconcile_restored</code>, then reactivated or re-ingested</td></tr>
+    <tr><td>Which version is live?</td><td><code>make sources TENANT_ONLY=acme</code> or <code>GET /v1/sources</code></td><td>every source's version, generation, counts, dates, fingerprint</td></tr>
+    <tr><td>Is the cache current?</td><td><code>make cache CACHE_OP=show</code></td><td><em>current</em>, or <em>STALE</em> with both fingerprints</td></tr>
+    <tr><td>Does the lifecycle work at all?</td><td><code>make smoke-reindex</code></td><td>v2 in: reindexed, the answer moved. v1 in: reactivated, the answer back.</td></tr>
+  </tbody>
+</table>
+</div>
+
+<div class="note">
+  <span class="label">A reindex is a release</span>
+  <p><code>make reindex</code> runs the offline evaluation gate <em>first</em>. A changed document that breaks the
+  golden question set is caught before anything is deployed, the same way a code change is. Then a live evaluation
+  scoped to just the questions that cite that document runs against a candidate deployment.</p>
+</div>
+
+<div class="next">
+  <a href="idempotency.html">
+    <span class="k">Next</span>
+    <span class="t">Why it is idempotent</span>
+    <span class="d">Six kinds of duplicate a real system produces, and the exact mechanism that absorbs each one.</span>
+  </a>
+  <a href="architecture.html">
+    <span class="k">Back</span>
+    <span class="t">The Firestore design</span>
+    <span class="d">The collections, ids, fields and indexes these steps rely on.</span>
+  </a>
+</div>
+
+<footer class="page">
+  <p>Code: <code>deploy/services/ingest/main.py</code> (the handler),
+  <code>idempotency.py</code> (claim, swap, undo, ledger),
+  <code>indexer.py</code> (carry-over and chunk rows),
+  <code>reconcile.py</code> (the nightly walk). Prose source: <code>deploy/INDEXING.md</code>.</p>
+</footer>
+
+</main>
+</body>
+</html>
