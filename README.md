@@ -15,6 +15,7 @@ Companion code repo for the **Netsetos GenAI on GCP Capstone** course (v2.0) at 
 | `.github/workflows/` | the kit's dry run on every push and the keyless release workflow (12.7) |
 | `requirements.txt` | the pins for running the notebooks locally |
 | `.env.example` | the two variables you set locally |
+| `module-04-rag/interview-prep/top-10-practical-rag-questions/` | a carousel deck: ten practical RAG interview questions with answers, as PNG pages and one PDF, plus the script that builds them |
 
 > Lesson pages, practice-lab walkthroughs and interview Q&A live on [netsetos.com](https://netsetos.com). This repo is code only:
 > open a notebook, run it, change it.
