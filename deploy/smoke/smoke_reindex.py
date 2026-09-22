@@ -16,8 +16,10 @@ the identity token), like smoke.py.
     python deploy/smoke/smoke_reindex.py
 
 Checks:
-    1. v1 in (ingest_ok, or a reactivation / duplicate when a previous run left it there)
-    2. v2 in, same name       -> ingest_ok with retired > 0, reused >= 1, embedded >= 1, the declared date
+    1. v1 in (ingest_ok, or a reactivation / duplicate / already-current when a previous run left it there)
+    2. v2 in, same name       -> ingest_ok with retired > 0, reused >= 1, embedded >= 1, the declared date; or
+                                 ingest_reactivated when a previous run within RETENTION_DAYS left v2 retired
+                                 (nothing embedded, v1 retired in turn; the date check is then skipped)
     3. ask                    -> the new value (bay 7), never the old one
     4. v1 in again            -> ingest_reactivated: nothing embedded, the old rows current again
     5. ask                    -> the old value (bay 4)
@@ -89,10 +91,15 @@ def upload(path: str) -> str:
 
 
 def wait_for(events: tuple[str, ...], since: dt.datetime, seconds: int = WAIT_S) -> dict | None:
-    """The worker's line for this upload: polls Cloud Logging every 10 s, like make reindex."""
+    """The worker's line for this upload: polls Cloud Logging every 10 s, like make reindex.
+
+    The tenant predicate accepts the doc_key's prefix too (23 September 2026): the duplicate line, written by
+    idempotency.py, carries the doc_key (tenant_sha256) and no tenant field, and it is the line check 1 waits
+    for on a lane that has run this smoke before."""
     ev = " OR ".join(f'jsonPayload.event="{e}"' for e in events)
     q = (f'resource.type="cloud_run_revision" AND resource.labels.service_name="documind-ingest" AND ({ev}) '
-         f'AND timestamp>="{since.strftime("%Y-%m-%dT%H:%M:%SZ")}" AND jsonPayload.tenant="{TENANT}"')
+         f'AND timestamp>="{since.strftime("%Y-%m-%dT%H:%M:%SZ")}" '
+         f'AND (jsonPayload.tenant="{TENANT}" OR jsonPayload.doc_key:"{TENANT}_")')
     deadline = time.time() + seconds
     while time.time() < deadline:
         rc, out = gcloud("logging", "read", q, "--project", PROJECT, "--limit", "1", "--format=json")
@@ -142,8 +149,8 @@ def main() -> int:
     # 1. version 1 in - a fresh index, or the leftover of the last run (a duplicate, or a reactivation)
     since = dt.datetime.now(dt.timezone.utc)
     upload(V1)
-    line = wait_for(("ingest_ok", "ingest_reactivated", "ingest_duplicate"), since)
-    if line and line.get("event") in ("ingest_ok", "ingest_reactivated", "ingest_duplicate"):
+    line = wait_for(("ingest_ok", "ingest_reactivated", "ingest_duplicate", "ingest_already_current"), since)
+    if line and line.get("event") in ("ingest_ok", "ingest_reactivated", "ingest_duplicate", "ingest_already_current"):
         ok("v1 indexed", f"{line.get('event')} chunks={line.get('chunks', '-')}")
     else:
         bad("v1 indexed", "no worker line in time - is documind-ingest deployed and the push subscription pointing at it?")
@@ -152,13 +159,22 @@ def main() -> int:
     # 2. version 2 in, the SAME object name: a re-issue, not a new document
     since = dt.datetime.now(dt.timezone.utc)
     upload(V2)
-    line = wait_for(("ingest_ok", "ingest_failed"), since)
-    if not line or line.get("event") != "ingest_ok":
+    line = wait_for(("ingest_ok", "ingest_reactivated", "ingest_failed"), since)
+    if not line or line.get("event") not in ("ingest_ok", "ingest_reactivated"):
         bad("v2 reindexed", f"got {line.get('event') if line else 'nothing'}: {str(line)[:200]}")
         upload(V1)
         return 1
     retired, reused, embedded = line.get("retired"), line.get("reused"), line.get("embedded")
-    if retired and retired > 0 and reused is not None and embedded is not None and reused >= 1 and embedded >= 1:
+    if line.get("event") == "ingest_reactivated":
+        # A previous run within RETENTION_DAYS left version 2 retired: the same bytes come back by the undo,
+        # nothing is embedded, and version 1 is retired in turn. The carry-over and the declared date were
+        # proved when version 2 was first indexed; the date now lives on its ledger row, not on this line.
+        if retired and retired > 0 and (line.get("chunks") or 0) > 0:
+            ok("v2 reindexed", f"reactivated from a previous run: chunks={line.get('chunks')} embedded=0 retired={retired}")
+        else:
+            bad("v2 reindexed", f"reactivated but retired={retired} chunks={line.get('chunks')}: version 1 was not retired in turn")
+        print("  [ -- ] v2 dated  a reactivated version keeps the date read when it was first indexed - skipped")
+    elif retired and retired > 0 and reused is not None and embedded is not None and reused >= 1 and embedded >= 1:
         ok("v2 reindexed", f"chunks={line.get('chunks')} reused={reused} embedded={embedded} retired={retired} "
                            f"effective_from={line.get('effective_from')}")
     elif retired and retired > 0 and reused is None:
@@ -166,7 +182,9 @@ def main() -> int:
     else:
         bad("v2 reindexed", f"retired={retired} reused={reused} embedded={embedded} - the previous version was not retired, "
                             "or nothing was carried over")
-    if line.get("effective_from") != "2026-10-01":
+    if line.get("event") == "ingest_reactivated":
+        pass                                        # judged above: the date is on the ledger row
+    elif line.get("effective_from") != "2026-10-01":
         bad("v2 dated", f"effective_from={line.get('effective_from')!r}, expected 2026-10-01 from the document's own line")
     else:
         ok("v2 dated", "effective_from=2026-10-01 read off the document")
