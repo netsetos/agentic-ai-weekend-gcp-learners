@@ -34,6 +34,7 @@
 #
 # On Windows without `make`, run the python commands directly, e.g.
 #     python deploy/validate.py
+#     python commands/lane.py sources          (the lane's records: mk/*.mk targets as direct Python calls)
 #
 # Tier B targets require terraform + gcloud and a real PROJECT; they intentionally
 # refuse to run without it. See README.md for the full live-day runbook.
@@ -194,6 +195,14 @@ SCRIPTS    = commands/lesson-12.5.sh commands/lesson-12.2.sh commands/lesson-12.
         reindex retire restore reconcile reconcile-job backfill-current sources purge smoke-reindex \
         batch queued batch-job graph managed-status rag-corpus rag-engine-enable tenant-policy tenant-backend \
         managed-stores managed-stores-down vector-status wait-vectors backfill-vectors
+
+# ---------- the module files (22 September 2026): one .mk per lane; the Makefile keeps the variables and the core ----------
+# mk/ingestion.mk  the roster and the tenant pins, the vector tier's status and repair, the ingest drills (the v5 course's Module 3)
+# mk/lifecycle.mk  the ledger (reindex, retire, restore, reconcile, sources, purge) and the batch lane (Module 4)
+# A recipe longer than a few lines is a script under commands/ or a subcommand of commands/lane.py, so the same
+# operation runs without make; the .mk target is its one-line entry. tools/check_*.py read the Makefile and
+# mk/*.mk as one text. Add a module: one file here, its targets in .PHONY above.
+include mk/*.mk
 
 # ---------- Tier A: offline ----------
 dryrun: check validate eval
@@ -375,89 +384,6 @@ wait-index: guard-project
 	echo ">> indexes READY"
 
 # ---------- The ANN tier (16 September 2026): what it holds, and the proof ----------
-# `make up` returns with the index created and EMPTY - correct, vector.tf names no batch input and
-# the worker fills it - so this is the line to run after make ingest-corpus, and the line to run
-# before claiming a Vector Search demonstration. vectorsCount is the index's own number; a streamed
-# upsert takes a few minutes to appear in it. The answer's stages.vector_chunks is the other half
-# of the proof: 0 while stages.retrieval_backend is `vector` means the Firestore rung answered.
-vector-status: guard-project
-	@IDX=$$(cd $(TF_DIR) && terraform output -raw vector_index_name 2>/dev/null); \
-	if [ -z "$$IDX" ]; then echo ">> no vector_index_name in the state: vector.tf is not applied"; exit 0; fi; \
-	gcloud ai indexes describe $$(basename $$IDX) --region=$(REGION) --project=$(PROJECT) \
-	  --format='yaml(displayName,indexStats.vectorsCount,indexStats.shardsCount,indexUpdateMethod)'; \
-	gcloud ai index-endpoints describe \
-	  $$(basename $$(cd $(TF_DIR) && terraform output -raw vector_index_endpoint)) \
-	  --region=$(REGION) --project=$(PROJECT) \
-	  --format='yaml(displayName,deployedIndexes[].id,deployedIndexes[].indexSyncTime)'
-
-# Block until the tier holds vectors, or say why not. WANT= the floor (default 1); 20 minutes at most.
-wait-vectors: guard-project
-	@IDX=$$(cd $(TF_DIR) && terraform output -raw vector_index_name); WANT=$${WANT:-1}; N=0; \
-	echo ">> waiting for >= $$WANT datapoints in $$(basename $$IDX)"; \
-	for i in $$(seq 1 60); do \
-	  N=$$(gcloud ai indexes describe $$(basename $$IDX) --region=$(REGION) --project=$(PROJECT) \
-	        --format='value(indexStats.vectorsCount)' 2>/dev/null); N=$${N:-0}; \
-	  if [ "$$N" -ge "$$WANT" ]; then echo ">> $$N datapoints"; exit 0; fi; \
-	  sleep 20; done; \
-	echo ">> still $$N datapoints after 20 min. Either the worker never upserted (documind-ingest logs: ingest_ok,"; \
-	echo ">> and VECTOR_INDEX_NAME on the service), or the corpus never landed (make ingest-corpus)."; \
-	echo ">> make backfill-vectors APPLY=1 fills the tier from the rows Firestore already holds."; exit 1
-
-# The ANN tier from the rows. Firestore holds every embedding - that is what the chaos rung reads - so a
-# tier that is empty when the corpus is not costs one pass over the rows and no model call. The state
-# this repairs: a worker deployed before vector.tf existed, or an apply that lost its index and succeeded
-# on the second run. Prints the count; APPLY=1 acts. TENANT_ONLY= one tenant.
-backfill-vectors: guard-project
-	PYTHONPATH=.:services/ingest GOOGLE_CLOUD_PROJECT=$(PROJECT) \
-	VECTOR_INDEX_NAME=$$(cd $(TF_DIR) && terraform output -raw vector_index_name) \
-	  $(PY) services/ingest/reconcile.py --project $(PROJECT) --backfill-vectors \
-	  $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
-
-# The roster is the tenancy boundary the surfaces enforce (shared/tenancy.py): a verified
-# person on no roster is a 403. Needs google-cloud-firestore locally
-# (pip install -r services/rag-api/requirements.txt once).
-roster: guard-project
-	@for m in $$(echo "$(MEMBERS)" | tr ',' ' '); do \
-	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy add $(TENANT) $$m; \
-	done
-	@# The UI's service account is the bearer identity of `make smoke` and `make eval-live`
-	@# (shared/iap.py's other leg; 12.2's SMOKE note), so it sits on the three golden tenants.
-	@for t in acme zeta globex; do \
-	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy add $$t \
-	    documind-ui-sa@$(PROJECT).iam.gserviceaccount.com; \
-	done
-	@# The MCP server's account (7.2) sits on the same three rosters: it retrieves for the agent
-	@# that called it, and the API checks ITS email on the tenant's roster like any other caller.
-	@for t in acme zeta globex; do \
-	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy add $$t \
-	    documind-mcp-sa@$(PROJECT).iam.gserviceaccount.com; \
-	done
-	@# The chat service's account (12.8) is a surface like the UI's: it calls the API as itself and
-	@# forwards the person's assertion when there is one. On the bearer leg - 8.7's notebook, make
-	@# smoke-chat - there is no assertion, and the API checks THIS account on the tenant's roster.
-	@for t in acme zeta globex; do \
-	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy add $$t \
-	    documind-chat-sa@$(PROJECT).iam.gserviceaccount.com; \
-	done
-	@# The A2A peer's account (8.4) sits on ONE roster, acme: a peer scoped to one tenant needs no
-	@# tenant argument, and a task naming another tenant is the MCP server's refusal - the replay.
-	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy add acme \
-	    documind-agent-sa@$(PROJECT).iam.gserviceaccount.com
-	@# The demo's data-region policies (13 September 2026, evening): acme and zeta may be mirrored into the
-	@# managed stores (4.3's corpus, 4.4's data store) and read from them; globex's text never leaves the
-	@# kit's own rows - the same deployment shows both. Absent would mean `in` for all three.
-	@for t in acme zeta; do \
-	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy policy $$t any; \
-	done
-	@GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy policy globex in
-
-# Where ONE tenant's text may be held: tenant_settings/{TENANT}.data_region (shared/tenancy.py). `in` keeps it on
-# the kit's rows (asia-south1); `any` lets the managed mirror copy its current versions into RAG Engine (us-central1)
-# and Vertex AI Search (global) and the API read them (RETRIEVAL_BACKEND, or the tenant's own retrieval_backend
-# pin). No service can write this field; without DATA_REGION the target prints the tenant's current policy.
-tenant-policy: guard-project
-	@test -n "$(TENANT)" || (echo "TENANT=<id> is required"; exit 2); \
-	GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy policy $(TENANT) $(DATA_REGION)
 
 # The corpus, one prefix per tenant, into the bucket eventarc.tf watches. Every object is one
 # ingest: Document AI, embeddings, Firestore. Watch documind-ingest's logs and the DLQ.
@@ -884,94 +810,6 @@ smoke-all: guard-project
 usage: guard-project
 	$(PY) evals/usage_rows.py --project $(PROJECT) --hours $${HOURS:-24}
 
-# 12.5's live cells. ingest-one puts ONE object under the tenant's prefix and waits for the worker's ingest_ok line;
-# poison puts a zero-byte object in (the worker's 400 and its ingest_poison line); dlq peeks at the dead-letter
-# subscription without acking - a poison message lands there after five failed deliveries, minutes later.
-ingest-one: guard-project
-	@test -n "$(FILE)" || (echo "FILE=<path> is required (TENANT=$(TENANT))"; exit 2); SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); NAME=$$(basename "$(FILE)"); \
-	gcloud storage cp "$(FILE)" gs://$(PROJECT)-uploads/$(TENANT)/$$NAME && echo ">> gs://$(PROJECT)-uploads/$(TENANT)/$$NAME - waiting for the worker (up to 5 min)"; \
-	for i in $$(seq 1 30); do sleep 10; \
-	  LINE=$$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND jsonPayload.event=\"ingest_ok\" AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.doc_key,jsonPayload.chunks,jsonPayload.pages)'); \
-	  if [ -n "$$LINE" ]; then echo ">> indexed: $$LINE"; exit 0; fi; done; echo ">> no ingest_ok in 5 min - gcloud logging read ... service_name=documind-ingest"; exit 1
-
-poison: guard-project
-	@SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); NAME=poison-$$(date +%s).pdf; : > /tmp/$$NAME; \
-	gcloud storage cp /tmp/$$NAME gs://$(PROJECT)-uploads/$(TENANT)/$$NAME && echo ">> zero-byte object in: $$NAME"; \
-	for i in $$(seq 1 12); do sleep 10; \
-	  LINE=$$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND jsonPayload.event=\"ingest_poison\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.error)'); \
-	  if [ -n "$$LINE" ]; then echo ">> the worker refused it (400): $$LINE"; echo ">> Pub/Sub retries a non-2xx five times with backoff, then ingest-dlq: make dlq in a few minutes"; exit 0; fi; done; echo ">> no ingest_poison line in 2 min"; exit 1
-
-dlq: guard-project
-	gcloud pubsub subscriptions pull ingest-dlq-sub --project $(PROJECT) --limit 5 --format='table(message.messageId,message.attributes.objectId,message.attributes.eventTime,deliveryAttempt)'
-
-# ---------- 12.5's ledger (11 September 2026): one current version per document ----------
-# reindex re-issues ONE document under an object name (NAME= overrides the basename: the shape-A demo re-uploads
-# evals/demo/hr_policy_2026_v2.md AS hr_policy_2026.md) and waits for the worker's line - ingest_ok with the
-# retired count, or ingest_reactivated when the bytes are a version the ledger had retired (the undo).
-reindex: guard-project
-	@test -n "$(FILE)" || (echo "FILE=<path> is required (TENANT=$(TENANT), NAME=<object name, default the basename>)"; exit 2); OBJ=$(if $(NAME),$(NAME),$$(basename "$(FILE)")); \
-	$(PY) evals/run_eval.py --source $$OBJ >/dev/null || (echo ">> the golden set is not sound: a reindex is a release, and the rows move with the document in the same commit - python evals/run_eval.py"; exit 1); \
-	SINCE=$$(date -u +%Y-%m-%dT%H:%M:%SZ); \
-	gcloud storage cp "$(FILE)" gs://$(PROJECT)-uploads/$(TENANT)/$$OBJ && echo ">> gs://$(PROJECT)-uploads/$(TENANT)/$$OBJ - waiting for the worker (up to 5 min)"; \
-	for i in $$(seq 1 30); do sleep 10; \
-	  LINE=$$(gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND (jsonPayload.event=\"ingest_ok\" OR jsonPayload.event=\"ingest_reactivated\") AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.event,jsonPayload.doc_key,jsonPayload.chunks,jsonPayload.reused,jsonPayload.embedded,jsonPayload.retired,jsonPayload.effective_from)'); \
-	  if [ -n "$$LINE" ]; then echo ">> event doc_key chunks reused embedded retired effective_from"; echo ">> $$LINE"; \
-	    gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"documind-ingest\" AND jsonPayload.event=\"ingest_superseded\" AND jsonPayload.tenant=\"$(TENANT)\" AND timestamp>=\"$$SINCE\"" --project $(PROJECT) --limit 1 --format='value(jsonPayload.retired_doc_keys,jsonPayload.retired_chunks,jsonPayload.expire_days)' | sed 's/^/>> retired (doc_keys, chunks, expire days): /'; \
-	    echo ">> the gate, scoped to this document, on a candidate: make eval-live PROJECT=$(PROJECT) SOURCE=$$OBJ API=<candidate url>"; exit 0; fi; done; echo ">> no ingest line in 5 min - gcloud logging read ... service_name=documind-ingest"; exit 1
-
-# withdraw a source by hand (SOURCE=acme/old.pdf or a gs:// URI): every current chunk of it is flagged with an
-# expire_at and the ledger row says WITHDRAWN (12 September 2026) - a tombstone, not `retired`. The object stays in
-# the bucket, the nightly reconcile leaves it there ("withdrawn, object kept"), the same bytes again are acked
-# (ingest_withdrawn) and never reactivated, the corpus fingerprint moves so the caches follow. Before this the row
-# said retired, and the next night's walk read "retired but back in the bucket" and resurrected what a person had
-# just taken down. make restore is the way back.
-retire: guard-project
-	@test -n "$(SOURCE)" || (echo "SOURCE=<tenant/name or gs://...> is required"; exit 2); \
-	PYTHONPATH=. MANAGED_MIRROR=$(MANAGED_MIRROR) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
-	  $(PY) services/ingest/reconcile.py --project $(PROJECT) --retire "$(SOURCE)" --apply
-
-# bring a withdrawn source back (SOURCE= as for retire): the tombstone is cleared and the object rewritten onto
-# itself, so the worker's own path returns it - ingest_reactivated inside the RETENTION_DAYS undo window (nothing
-# embedded), ingest_ok as a fresh version after it. Refused, with the reason, for a source that is not withdrawn or
-# whose object is gone from the bucket.
-restore: guard-project
-	@test -n "$(SOURCE)" || (echo "SOURCE=<tenant/name or gs://...> is required"; exit 2); \
-	$(PY) services/ingest/reconcile.py --project $(PROJECT) --restore "$(SOURCE)" --apply
-
-# the full reconciliation: the bucket's current generations against sources/. Prints the plan; APPLY=1 acts.
-reconcile: guard-project
-	PYTHONPATH=. MANAGED_MIRROR=$(MANAGED_MIRROR) RAG_LOCATION=$(RAG_LOCATION) AUDIT_BUCKET=$(PROJECT)-audit GOOGLE_CLOUD_PROJECT=$(PROJECT) \
-	  $(PY) services/ingest/reconcile.py --project $(PROJECT) $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
-
-# once, after the ledger ships onto a lane that predates it: chunks and documents get current=true, a doc_key and
-# a sources/ row each; then RETRIEVAL_CURRENT_ONLY=on is safe to flip (on a candidate first).
-backfill-current: guard-project
-	$(PY) services/ingest/reconcile.py --project $(PROJECT) --backfill --apply
-
-# the nightly job, from the ingest image the lane already runs; then RECONCILE_JOB=true on the next make plan
-# schedules it (reconcile.tf) at 23:30 IST, after documind-off.
-reconcile-job: RECONCILE_JOB = true
-reconcile-job: guard-project
-	cd $(TF_DIR) && $(TF_INIT) && terraform apply -input=false -auto-approve $(TF_VARS)
-	@echo ">> documind-reconcile declared on $(RECONCILE_IMAGE) and scheduled 23:30 IST (reconcile.tf); gcloud run jobs execute documind-reconcile --region $(REGION) --project $(PROJECT) runs it now"
-	@echo ">> keep RECONCILE_JOB=true on every later make plan / make up, or the next apply removes the job and its schedule"
-
-# ---------- the batch lane (13 September 2026): the consumer ----------
-# A document over MAX_INLINE_PAGES is queued by the worker (ingest_batch/{doc_key}, the claim says queued) and indexed by
-# documind-ingest-batch: a Cloud Run job on the ingest image (batch.tf), which the worker starts as it queues (BATCH_JOB
-# in its environment, set by deploy-services once BATCH_JOB=true) and an hourly schedule backstops. batch-job is an apply
-# with the switch on, like reconcile-job; batch starts the job now and waits; queued lists the queue from the shell
-# (needs google-cloud-firestore, like make roster). Keep BATCH_JOB=true on every later make plan / make up.
-batch-job: BATCH_JOB = true
-batch-job: guard-project
-	cd $(TF_DIR) && $(TF_INIT) && terraform apply -input=false -auto-approve $(TF_VARS)
-	@echo ">> documind-ingest-batch declared on $(RECONCILE_IMAGE) and scheduled hourly (batch.tf); the worker starts it as it queues once"
-	@echo ">> make deploy-services BATCH_JOB=true tells the worker the job's name (BATCH_JOB in commands/lesson-12.5.sh)"
-batch: guard-project
-	gcloud run jobs execute documind-ingest-batch --region $(REGION) --project $(PROJECT) --wait
-queued: guard-project
-	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) batch.py --project $(PROJECT) --queued
-
 # ---------- the managed mirror (P9, 13 September 2026): 4.3's RAG Engine and 4.4's Vertex AI Search per tenant ----------
 # services/ingest/managed.py. The stores are declared, never created by the worker: MANAGED_SEARCH=true on make plan /
 # make up declares a Vertex AI Search data store per tenant (managed.tf, the tenants variable); rag-corpus creates a
@@ -1015,15 +853,6 @@ managed-stores-down: guard-project
 	  GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend $$t default; \
 	done
 
-# Which store answers ONE tenant's questions: tenant_settings/{TENANT}.retrieval_backend (shared/tenancy.py), the
-# way 11.4 pins a model. vector | firestore | rag_engine | vertex_search; `default` clears the pin; empty prints it.
-# Held against the tenant's data_region on every request (rag-api main.py: an `in` tenant pinned to a managed
-# store is served from the kit's index with policy_fallback=1 on the row), so a pin cannot move text the policy
-# keeps home. Read once a minute per tenant - no redeploy.
-tenant-backend: guard-project
-	@test -n "$(TENANT)" || (echo "TENANT=<id> is required"; exit 2); \
-	GOOGLE_CLOUD_PROJECT=$(PROJECT) $(PY) -m shared.tenancy backend $(TENANT) $(RETRIEVAL_BACKEND)
-
 # ---------- 4.6's graph, on the lane (13 September 2026) ----------
 # services/ingest/graph.py: the tenant's current chunks through the lesson's extraction, resolution and build, written
 # with shared/documind_graph.FirestoreGraph - the class the notebook runs - into graph_nodes / graph_edges. Then the API
@@ -1038,20 +867,3 @@ graph: guard-project
 	cd services/ingest && GOOGLE_CLOUD_PROJECT=$(PROJECT) PYTHONPATH=../.. \
 	  SPANNER_INSTANCE=$(SPANNER_INSTANCE) SPANNER_DATABASE=$(SPANNER_DATABASE) \
 	  $(PY) graph.py --project $(PROJECT) --tenant $(TENANT) --backend $(GRAPH_BACKEND) $(GRAPH_ARGS)
-
-# the versions view from the shell: every source's current version, generation, what the last reindex cost, the date
-# it declares, the corpus fingerprint - the rows GET /v1/sources serves and the UI's Documents page renders.
-sources: guard-project
-	$(PY) services/ingest/reconcile.py --project $(PROJECT) --report $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(JSON),--json,)
-
-# the manual twin of the TTL policy (firestore_indexes.tf): retired rows past expire_at. Prints; APPLY=1 deletes. On a
-# lane with the policy applied it finds nothing to do, which is the point of running it once.
-purge: guard-project
-	$(PY) services/ingest/reconcile.py --project $(PROJECT) --purge $(if $(TENANT_ONLY),--tenant $(TENANT_ONLY),) $(if $(APPLY),--apply,)
-
-# the document lifecycle, smoked like every surface: a small fixture in twice under one name (reindexed with the
-# carry-over counts, the answer moved), then version 1 again (reactivated, nothing embedded, the answer back).
-smoke-reindex: guard-project
-	@NUMBER=$$(gcloud projects describe $(PROJECT) --format='value(projectNumber)'); \
-	DOCUMIND_PROJECT=$(PROJECT) DOCUMIND_API_URL=$${DOCUMIND_API_URL:-https://documind-api-$$NUMBER.$(REGION).run.app} DOCUMIND_TENANT=$(TENANT) \
-	DOCUMIND_IMPERSONATE_SA=$${DOCUMIND_IMPERSONATE_SA:-documind-ui-sa@$(PROJECT).iam.gserviceaccount.com} $(PY) smoke/smoke_reindex.py

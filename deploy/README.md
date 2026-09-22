@@ -307,7 +307,7 @@ is a release: `make reindex` runs the offline gate first, the golden set has a `
 `smoke-all`. Not yet: `make reembed` (a model migration) and an as-of filter - the strategy's next phase.
 
 Ingestion is the same in both: a Cloud Storage notification on the uploads bucket into the
-`documind-ingest` topic, a push subscription with an OIDC token, five attempts, then the DLQ
+`documind-ingest` topic, a push subscription with an OIDC token, twelve attempts, then the DLQ
 (`eventarc.tf`). The worker sends PDFs to Document AI in 15-page slices, which is the online
 limit, so the corpus's hundred-page Acts go through inline. Anything over `MAX_INLINE_PAGES` (250) is queued
 for the batch lane's consumer (13 September 2026): `documind-ingest-batch`, a Cloud Run job on the ingest image
@@ -443,7 +443,8 @@ The first Tier-A run flagged these real issues in the Module 12 source. They are
 deploy/
 ├── extract_documind.py   # notebooks -> this tree (static, no code execution)
 ├── validate.py           # Tier-A offline checks
-├── Makefile              # dryrun / plan / up / smoke / down
+├── Makefile              # the variables and the core: dryrun / plan / up / smoke / down; `include mk/*.mk`
+├── mk/                   # one file per lane: ingestion.mk (Module 3), lifecycle.mk (Module 4) - see mk/README.md
 ├── terraform/            # 11 .tf, all generated from the 12.1/12.3 notebooks:
 │   │                     #   variables.tf  project_id, region, india_region, env,
 │   │                     #                 admin_emails, residency (india | us)
