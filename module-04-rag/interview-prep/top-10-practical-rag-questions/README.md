@@ -12,6 +12,7 @@ a difficulty tag on every page, and a faint `@netsetos` watermark across each on
 | `output/top-10-practical-rag-interview-questions.pdf` | all 11 pages, vector text; upload this as a LinkedIn document post |
 | `output/png/00-cover.png` ... `output/png/10-question.png` | one 1080 x 1440 image per page, for image posts, stories or Instagram |
 | `build.py` | the content (questions, answers, handle, watermark, colours) and the page template; edit this, then rebuild |
+| `caption.md` | the LinkedIn caption to post with the PDF, plus a short version for image posts |
 | `fonts/Lora-variable.woff2` | the serif used on every page, SIL Open Font License (`fonts/OFL.txt`) |
 
 ## The ten questions
