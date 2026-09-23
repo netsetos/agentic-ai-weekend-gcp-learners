@@ -3,7 +3,8 @@
 An eleven-page carousel: a cover plus ten scenario-based RAG interview questions, each with an
 answer you can defend in the room. The questions run from easy to tough: two warm-ups, five
 everyday engineering problems, three that separate senior candidates. Navy and teal palette,
-a difficulty tag on every page, and a faint `@netsetos` watermark across each one.
+a difficulty tag on every page, a faint `@netsetos` watermark across each one, and a round
+portrait on the cover.
 
 ## Files
 
@@ -14,6 +15,7 @@ a difficulty tag on every page, and a faint `@netsetos` watermark across each on
 | `build.py` | the content (questions, answers, handle, watermark, colours) and the page template; edit this, then rebuild |
 | `caption.md` | the LinkedIn caption to post with the PDF, plus a short version for image posts |
 | `fonts/Lora-variable.woff2` | the serif used on every page, SIL Open Font License (`fonts/OFL.txt`) |
+| `cover-photo.png` | the square portrait shown in the round badge on the cover; replace it with any square photo (600 px or larger) |
 
 ## The ten questions
 
@@ -48,6 +50,8 @@ Everything lives at the top of `build.py`:
 - `HANDLE`, `FOOTER_FOLLOW`, `FOOTER_CTA`: the footer band on every question page.
 - `WATERMARK`, `WATERMARK_OPACITY`: the diagonal stamp. Set the opacity to 0 to hide it.
 - `COVER_BADGE`, `COVER_PILL`, `COVER_TITLE`, `COVER_SUBTITLE`: the cover. Wrap a word in `<em>` to print it in teal.
+- `COVER_PHOTO`: the portrait file. Delete the file to build the cover without it; the position and ring
+  are the `.portrait` rule in `CSS`.
 - `LEVELS`: the three difficulty tiers and their tag colours. The cover's "Q1-2 Easy" row is computed from
   each question's `level`, so reordering questions updates it.
 - `QUESTIONS`: one entry per page with a `level`, a `category` (the small caps under "Question N"), the

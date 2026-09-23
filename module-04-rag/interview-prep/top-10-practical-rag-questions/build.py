@@ -42,6 +42,7 @@ COVER_PILL = "RAG Interview Prep"
 # <em> marks the words printed in the accent colour on the cover.
 COVER_TITLE = "Top 10 Practical <em>RAG</em> Interview Questions You'll Face in <em>2026</em>"
 COVER_SUBTITLE = "(With Answers)"
+COVER_PHOTO = HERE / "cover-photo.png"   # square portrait for the cover; delete the file to drop it
 
 # Difficulty tiers: the tag on each question page and the summary row on the cover.
 LEVELS = {
@@ -349,6 +350,11 @@ body {
 .tiers { display: flex; gap: 14px; margin-top: 34px; }
 .tier { padding: 10px 22px; border-radius: 999px; font-size: 19px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; }
 .diagram { position: absolute; left: 0; bottom: 8px; width: __W__px; height: 300px; }
+.portrait {
+  position: absolute; left: 795px; top: 1060px; width: 250px; height: 250px; z-index: 4;
+  border-radius: 50%; object-fit: cover; background: #0B2545;
+  box-shadow: 0 0 0 7px #fff, 0 0 0 13px var(--accent-bright), 0 18px 36px rgba(11,37,69,.30);
+}
 """
 
 SPARK = (
@@ -365,7 +371,7 @@ DIAGRAM = """
       <path d="M0,0 L10,5 L0,10 z" fill="#14213D"/>
     </marker>
   </defs>
-  <g transform="translate(180,0)" font-family="Liberation Sans, Arial, Helvetica, sans-serif" font-size="17" fill="#14213D" text-anchor="middle">
+  <g transform="translate(48,4) scale(0.95)" font-family="Liberation Sans, Arial, Helvetica, sans-serif" font-size="17" fill="#14213D" text-anchor="middle">
     <rect x="0" y="30" width="120" height="62" rx="6" fill="#fff" stroke="#0B2545" stroke-width="2"/>
     <text x="60" y="67">Prompt</text>
 
@@ -438,6 +444,12 @@ def tier_pills() -> str:
     return "\n      ".join(pills)
 
 
+def portrait() -> str:
+    if not COVER_PHOTO.exists():
+        return ""
+    return f'<img class="portrait" src="../../{COVER_PHOTO.name}" alt="">'
+
+
 def cover_body() -> str:
     diagram = DIAGRAM.replace("__W__", str(PAGE_W))
     return f"""<div class="page cover">
@@ -456,6 +468,7 @@ def cover_body() -> str:
     </div>
   </div>
   {diagram}
+  {portrait()}
   {watermark()}
 </div>"""
 
